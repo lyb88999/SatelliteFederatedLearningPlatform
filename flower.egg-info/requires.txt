@@ -1,0 +1,9 @@
+numpy
+matplotlib
+pytest
+pytest-asyncio
+websockets
+flwr==1.14.0
+torch
+torchvision
+psutil

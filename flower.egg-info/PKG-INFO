@@ -1,0 +1,12 @@
+Metadata-Version: 2.1
+Name: flower
+Version: 0.1
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: pytest
+Requires-Dist: pytest-asyncio
+Requires-Dist: websockets
+Requires-Dist: flwr==1.14.0
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: psutil

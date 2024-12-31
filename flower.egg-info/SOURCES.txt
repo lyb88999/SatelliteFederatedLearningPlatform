@@ -1,0 +1,16 @@
+setup.py
+flower/__init__.py
+flower/client.py
+flower/config.py
+flower/fl_server.py
+flower/monitor.py
+flower/orbit_utils.py
+flower/scheduler.py
+flower/server.py
+flower/status_server.py
+flower/visualization.py
+flower.egg-info/PKG-INFO
+flower.egg-info/SOURCES.txt
+flower.egg-info/dependency_links.txt
+flower.egg-info/requires.txt
+flower.egg-info/top_level.txt
