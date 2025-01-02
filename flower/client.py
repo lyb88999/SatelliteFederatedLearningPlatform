@@ -276,15 +276,15 @@ class SatelliteFlowerClient(fl.client.Client):
             self.train_loader = None
             self.test_loader = None
             
-    def get_parameters(self, config) -> List[np.ndarray]:
+    def get_parameters(self, config: Dict[str, str]) -> fl.common.NDArrays:
         """获取模型参数"""
-        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+        return [val.cpu().numpy() for val in self.model.state_dict().values()]
         
-    def set_parameters(self, parameters: List[np.ndarray]) -> None:
+    def set_parameters(self, parameters: fl.common.NDArrays) -> None:
         """设置模型参数"""
         params_dict = zip(self.model.state_dict().keys(), parameters)
         state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-        self.model.load_state_dict(state_dict, strict=True)
+        self.model.load_state_dict(state_dict)
         
     def receive_model(self, parameters) -> None:
         """接收模型参数（协调者专用）"""
@@ -296,56 +296,61 @@ class SatelliteFlowerClient(fl.client.Client):
         # 设置模型参数
         self.set_parameters(parameters_arrays)
         
-    def fit(self, parameters, config) -> Tuple[fl.common.Parameters, int, Dict]:
+    def fit(self, parameters, config):
         """训练模型"""
-        # 设置模型参数
-        self.set_parameters(fl.common.parameters_to_ndarrays(parameters))
-        
-        # 如果是协调者，只接收参数不训练
-        if self.config.is_coordinator or config.get("is_coordinator", False):
-            return parameters, 0, {}  # 直接返回接收到的参数
-        
-        if self.train_loader is None:
-            print(f"警告: 客户端 {self.cid} 没有训练数据")
-            return parameters, 0, {}
-        
-        # 初始化优化器
-        if self.optimizer is None:
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
-        
-        # 训练模型
-        self.model.train()
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        
-        for data, target in self.train_loader:
-            data, target = data.to(self.device), target.to(self.device)
-            self.optimizer.zero_grad()
-            output = self.model(data)
-            loss = F.cross_entropy(output, target)
-            loss.backward()
-            self.optimizer.step()
+        try:
+            # 设置模型参数
+            params_dict = zip(self.model.state_dict().keys(), fl.common.parameters_to_ndarrays(parameters))
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+            self.model.load_state_dict(state_dict)
             
-            total_loss += loss.item()
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
-            total += target.size(0)
+            if self.train_loader is None:
+                print(f"警告: 客户端 {self.cid} 没有训练数据")
+                return None
             
-        accuracy = correct / total
-        avg_loss = total_loss / len(self.train_loader)
-        
-        print(f"客户端 {self.cid} 训练完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
-        
-        # 返回 Parameters 对象而不是列表
-        parameters = fl.common.ndarrays_to_parameters(
-            [val.cpu().numpy() for _, val in self.model.state_dict().items()]
-        )
-        
-        return parameters, total, {
-            "accuracy": float(accuracy),
-            "loss": float(avg_loss)
-        }
+            # 设置训练模式
+            self.model.train()
+            
+            # 创建优化器
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+            
+            # 训练一个epoch
+            total_loss = 0.0
+            total_examples = 0
+            correct = 0
+            
+            for data, target in self.train_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                optimizer.zero_grad()
+                output = self.model(data)
+                loss = F.cross_entropy(output, target)
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item() * len(data)
+                total_examples += len(data)
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+            
+            # 计算指标
+            accuracy = correct / total_examples
+            avg_loss = total_loss / total_examples
+            
+            print(f"客户端 {self.cid} 训练完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
+            
+            # 返回更新后的模型参数
+            return [
+                val.cpu().numpy() for val in self.model.state_dict().values()
+            ], total_examples, {
+                "accuracy": float(accuracy),
+                "loss": float(avg_loss)
+            }
+            
+        except Exception as e:
+            print(f"客户端 {self.cid} 训练失败: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            return None
 
     def evaluate(self, parameters, config):
         """评估模型"""

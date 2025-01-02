@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple
+from datetime import datetime
 
 @dataclass
 class GroundStationConfig:
@@ -11,24 +12,17 @@ class GroundStationConfig:
 
 @dataclass
 class SatelliteConfig:
-    def __init__(
-        self,
-        orbit_altitude: float = 550.0,
-        orbit_inclination: float = 97.6,
-        orbital_period: float = 95.0,
-        ground_stations: List[GroundStationConfig] = None,
-        ascending_node: float = 0.0,
-        mean_anomaly: float = 0.0,
-        orbit_id: int = 0,
-        sat_id: int = 0,
-        is_coordinator: bool = False
-    ):
-        self.orbit_altitude = orbit_altitude
-        self.orbit_inclination = orbit_inclination
-        self.orbital_period = orbital_period
-        self.ground_stations = ground_stations or []
-        self.ascending_node = ascending_node
-        self.mean_anomaly = mean_anomaly
-        self.orbit_id = orbit_id
-        self.sat_id = sat_id
-        self.is_coordinator = is_coordinator 
+    orbit_id: int
+    sat_id: int
+    is_coordinator: bool = False
+    
+    # 轨道参数
+    semi_major_axis: float = 7000.0  # 半长轴(km)
+    eccentricity: float = 0.0        # 偏心率
+    inclination: float = 98.0        # 倾角(度)
+    raan: float = 0.0                # 升交点赤经(度)
+    arg_perigee: float = 0.0         # 近地点幅角(度)
+    epoch: datetime = field(default_factory=datetime.now)  # 历元
+    
+    # 通信参数
+    max_communication_distance: float = 1000.0  # 最大通信距离(km) 

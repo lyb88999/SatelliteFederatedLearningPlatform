@@ -14,5 +14,7 @@ setup(
         "torch",
         "torchvision",
         "psutil",
+        "poliastro",
+        "astropy",
     ],
 ) 

@@ -414,30 +414,37 @@ def test_hierarchical_training(fl_test_environment):
 
 def create_test_environment():
     """创建测试环境"""
-    # 创建轨道计算器
     orbit_calculator = OrbitCalculator()
     
-    # 创建模型
-    model = create_model()  # 添加这个函数
+    # 创建三个轨道平面
+    orbit_params = [
+        {
+            'semi_major_axis': 7000.0,  # LEO轨道
+            'inclination': 98.0,        # 太阳同步轨道
+            'raan': i * 120.0           # 均匀分布的轨道平面
+        }
+        for i in range(3)
+    ]
     
-    # 创建客户端和协调者
     clients = []
     coordinators = []
     
-    for orbit_id in range(3):  # 3个轨道
-        # 每个轨道4个卫星
+    for orbit_id, params in enumerate(orbit_params):
+        # 在每个轨道上均匀分布4颗卫星
         for sat_id in range(4):
-            # 创建配置
             config = SatelliteConfig(
                 orbit_id=orbit_id,
                 sat_id=sat_id,
-                is_coordinator=(sat_id == 1)  # 每个轨道的第二个卫星作为协调者
+                is_coordinator=(sat_id == 0),
+                semi_major_axis=params['semi_major_axis'],
+                inclination=params['inclination'],
+                raan=params['raan'],
+                arg_perigee=sat_id * 90.0  # 均匀分布在轨道上
             )
             
-            # 创建客户端
             client = SatelliteFlowerClient(
                 cid=f"orbit_{orbit_id}_sat_{sat_id}",
-                model=model.state_dict(),  # 传入模型参数
+                model=create_model(),
                 config=config
             )
             
@@ -445,7 +452,7 @@ def create_test_environment():
                 coordinators.append(client)
             else:
                 clients.append(client)
-    
+                
     return {
         'clients': clients,
         'coordinators': coordinators,
