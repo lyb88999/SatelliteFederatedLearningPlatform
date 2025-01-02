@@ -3,12 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 import flwr as fl
 import numpy as np
 from collections import OrderedDict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import asyncio
 import websockets
 import json
@@ -18,6 +18,8 @@ import psutil
 from flower.config import SatelliteConfig, GroundStationConfig
 from flower.orbit_utils import OrbitCalculator
 import os
+from .resource_monitor import ResourceMonitor
+import random
 
 # 在文件开头添加自定义异常类
 class SatelliteError(Exception):
@@ -42,8 +44,8 @@ class Net(nn.Module):
         super(Net, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
-        self.dropout1 = nn.Dropout2d(0.25)
-        self.dropout2 = nn.Dropout2d(0.5)
+        self.dropout1 = nn.Dropout(0.25)
+        self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(9216, 128)
         self.fc2 = nn.Linear(128, 10)
 
@@ -149,56 +151,68 @@ class OrbitCoordinatorClient(fl.client.NumPyClient):
         self.collected_parameters = []  # 存储收到的参数
         self.collected_metrics = []     # 存储收到的指标
         self.orbit_members = set()      # 轨道内的成员节点
+        self.criterion = nn.CrossEntropyLoss()  # 添加损失函数
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)  # 添加优化器
+        
+    def set_parameters(self, parameters: List[np.ndarray]) -> None:
+        """设置模型参数"""
+        params_dict = zip(self.model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
+        
+    def get_parameters(self, config: Dict) -> List[np.ndarray]:
+        """获取模型参数"""
+        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
         
     def collect_parameters(self, parameters, num_samples: int, metrics: Dict):
         """收集轨道内其他节点的参数"""
         self.collected_parameters.append((parameters, num_samples))
         self.collected_metrics.append(metrics)
         
-    def aggregate_parameters(self):
+    def aggregate_parameters(self, parameters: List[List[np.ndarray]]) -> List[np.ndarray]:
         """聚合收集到的参数"""
-        if not self.collected_parameters:
+        if not parameters:
             return None
             
         # 使用 FedAvg 聚合参数
-        total_samples = sum(num for _, num in self.collected_parameters)
-        weighted_params = [
-            [layer * num for layer in params] 
-            for params, num in self.collected_parameters
-        ]
+        num_layers = len(parameters[0])
+        aggregated = []
         
-        aggregated = [
-            sum(layer_updates) / total_samples 
-            for layer_updates in zip(*weighted_params)
-        ]
-        
-        # 清空收集的参数
-        self.collected_parameters = []
-        self.collected_metrics = []
+        for layer_idx in range(num_layers):
+            layer_updates = [p[layer_idx] for p in parameters]
+            aggregated.append(np.mean(layer_updates, axis=0))
         
         return aggregated
         
     def fit(self, parameters, config):
-        """协调者不进行训练，只进行参数聚合"""
+        """协调者不进行训练,只进行参数聚合"""
         try:
             print(f"\n{'='*50}")
             print(f"Coordinator {self.cid}: 开始聚合轮次")
             print(f"{'='*50}")
             
-            # 如果没有收集到参数，返回原始参数
+            # 设置当前参数
+            self.set_parameters(parameters)
+            
+            # 如果没有收集到参数,返回当前参数
             if not self.collected_parameters:
-                print(f"Coordinator {self.cid}: 没有收到任何参数，返回原始参数")
-                return parameters, 1, {}  # 返回 1 作为样本数，避免除零错误
+                print(f"Coordinator {self.cid}: 没有收到任何参数,返回当前参数")
+                return parameters, 1, {}
             
             # 聚合参数
-            aggregated_parameters = self.aggregate_parameters()
+            collected_params = [p for p, _ in self.collected_parameters]
+            aggregated_parameters = self.aggregate_parameters(collected_params)
             if aggregated_parameters is None:
-                print(f"Coordinator {self.cid}: 聚合失败，返回原始参数")
+                print(f"Coordinator {self.cid}: 聚合失败,返回当前参数")
                 return parameters, 1, {}
             
             total_samples = sum(num for _, num in self.collected_parameters)
             print(f"Coordinator {self.cid}: 聚合了 {len(self.collected_parameters)} 个客户端的参数")
             print(f"Coordinator {self.cid}: 总样本数: {total_samples}")
+            
+            # 清空收集的参数
+            self.collected_parameters = []
+            self.collected_metrics = []
             
             return aggregated_parameters, total_samples, {
                 "aggregated_metrics": self.collected_metrics
@@ -206,221 +220,179 @@ class OrbitCoordinatorClient(fl.client.NumPyClient):
             
         except Exception as e:
             print(f"Coordinator {self.cid}: 聚合错误 - {str(e)}")
-            return parameters, 1, {}  # 出错时返回原始参数
+            return parameters, 1, {}
+
+    def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
+        """评估模型"""
+        self.set_parameters(parameters)
+        self.model.eval()
+        
+        loss = 0.0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for data, target in self.test_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                output = self.model(data)
+                loss += self.criterion(output, target).item()
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                total += target.size(0)
+        
+        accuracy = correct / total
+        return loss, total, {"accuracy": accuracy}
+
+    def train_local(self) -> Dict:
+        """协调者的本地训练"""
+        print(f"Coordinator {self.cid}: 跳过本地训练")
+        return {
+            "loss": 0.0,
+            "accuracy": 0.0,
+            "parameters": self.get_parameters({})
+        }
+
+def create_model() -> nn.Module:
+    """创建一个简单的CNN模型"""
+    return Net()  # 使用之前定义的 Net 类
 
 # 然后定义 SatelliteFlowerClient 类
-class SatelliteFlowerClient(fl.client.NumPyClient):
-    def __init__(self, cid, model, train_loader, test_loader, device, config: SatelliteConfig):
-        super().__init__()
+class SatelliteFlowerClient(fl.client.Client):
+    """卫星端 Flower 客户端"""
+    
+    def __init__(self, cid: str, model: OrderedDict, config: SatelliteConfig, 
+                 train_loader=None, test_loader=None, device=None):
         self.cid = cid
         self.model = model
+        self.config = config
+        self.optimizer = None
         self.train_loader = train_loader
         self.test_loader = test_loader
-        self.device = device
-        self.config = config
-        self.orbit_calculator = OrbitCalculator(config)
-        self.current_ground_station = None
-        self.next_window = None
-        self.training_buffer = []
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-        self.coordinator = None  # 协调者引用
+        self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.training_progress = {}
         
-    def _wait_for_communication_window(self) -> bool:
-        """等待下一个通信窗口"""
-        print(f"\n{'='*50}")
-        print(f"Client {self.cid}: 通信窗口检查")
-        print(f"{'='*50}")
-        print(f"当前时间: {datetime.now().strftime('%H:%M:%S')}")
+        # 如果是协调者，不需要训练和测试数据
+        if self.config.is_coordinator:
+            self.train_loader = None
+            self.test_loader = None
+            
+    def get_parameters(self, config) -> List[np.ndarray]:
+        """获取模型参数"""
+        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
         
-        # 检查所有地面站
-        for station in self.config.ground_stations:
-            is_visible = self.orbit_calculator.calculate_visibility(station, datetime.now())
-            print(f"\n检查地面站 {station.station_id}:")
-            print(f"- 位置: {station.latitude:.2f}°N, {station.longitude:.2f}°E")
-            print(f"- 可见性: {'可见' if is_visible else '不可见'}")
-            
-            if is_visible:
-                self.current_ground_station = station
-                print(f"\n✅ 已建立与地面站 {station.station_id} 的连接")
-                return True
+    def set_parameters(self, parameters: List[np.ndarray]) -> None:
+        """设置模型参数"""
+        params_dict = zip(self.model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
         
-        # 如果没有可用的地面站，预测下一个窗口
-        print("\n❌ 当前无可用地面站，计算下一个通信窗口...")
-        next_windows = []
-        for station in self.config.ground_stations:
-            window_time, duration = self.orbit_calculator.get_next_window(
-                station,
-                datetime.now()
-            )
-            if window_time:
-                next_windows.append((window_time, duration, station))
-                print(f"\n地面站 {station.station_id} 的下一个窗口:")
-                print(f"- 开始时间: {window_time.strftime('%H:%M:%S')}")
-                print(f"- 持续时间: {duration.total_seconds():.1f} 秒")
+    def receive_model(self, parameters) -> None:
+        """接收模型参数（协调者专用）"""
+        if not self.config.is_coordinator:
+            raise ValueError(f"客户端 {self.cid} 不是协调者，无法接收模型")
+            
+        # 将参数转换为 numpy 数组列表
+        parameters_arrays = fl.common.parameters_to_ndarrays(parameters)
+        # 设置模型参数
+        self.set_parameters(parameters_arrays)
         
-        if next_windows:
-            # 选择最近的窗口
-            next_window, duration, station = min(next_windows, key=lambda x: x[0])
-            wait_time = (next_window - datetime.now()).total_seconds()
-            
-            if wait_time > 0:
-                print(f"\n⏳ 等待下一个通信窗口...")
-                print(f"- 选择地面站: {station.station_id}")
-                print(f"- 等待时间: {wait_time:.1f} 秒")
-                print(f"- 窗口持续: {duration.total_seconds():.1f} 秒")
-                
-                # 显示倒计时
-                for remaining in range(int(wait_time), 0, -1):
-                    print(f"\r倒计时: {remaining} 秒...", end='', flush=True)
-                    time.sleep(1)
-                print("\n")
-                
-                self.current_ground_station = station
-                print(f"✅ 已建立与地面站 {station.station_id} 的连接")
-                return True
+    def fit(self, parameters, config) -> Tuple[fl.common.Parameters, int, Dict]:
+        """训练模型"""
+        # 设置模型参数
+        self.set_parameters(fl.common.parameters_to_ndarrays(parameters))
         
-        print("\n❌ 无法找到可用的通信窗口")
-        print(f"{'='*50}\n")
-        return False
-
-    def _save_checkpoint(self):
-        """保存检查点"""
-        try:
-            checkpoint = {
-                'model_state': self.model.state_dict(),
-                'optimizer_state': self.optimizer.state_dict() if self.optimizer else None,
-                'client_id': self.cid,
-                'current_ground_station': self.current_ground_station.station_id if self.current_ground_station else None,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            checkpoint_path = f'checkpoint_satellite_{self.cid}.pt'
-            torch.save(checkpoint, checkpoint_path)
-            print(f"Client {self.cid}: 保存检查点到 {checkpoint_path}")
-            
-        except Exception as e:
-            print(f"Client {self.cid}: 保存检查点失败 - {str(e)}")
-
-    def _load_checkpoint(self):
-        """加载检查点"""
-        try:
-            checkpoint_path = f'checkpoint_satellite_{self.cid}.pt'
-            if os.path.exists(checkpoint_path):
-                checkpoint = torch.load(checkpoint_path)
-                self.model.load_state_dict(checkpoint['model_state'])
-                if checkpoint['optimizer_state'] and self.optimizer:
-                    self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-                print(f"Client {self.cid}: 加载检查点 {checkpoint_path}")
-                return True
-        except Exception as e:
-            print(f"Client {self.cid}: 加载检查点失败 - {str(e)}")
-        return False
-
-    def set_coordinator(self, coordinator: OrbitCoordinatorClient):
-        """设置轨道协调者"""
-        self.coordinator = coordinator
+        # 如果是协调者，只接收参数不训练
+        if self.config.is_coordinator or config.get("is_coordinator", False):
+            return parameters, 0, {}  # 直接返回接收到的参数
         
-    def _check_orbit_visibility(self, other_satellite) -> bool:
-        """检查是否可以与轨道内其他卫星通信"""
-        # TODO: 实现轨道内可见性检查
-        return True
+        if self.train_loader is None:
+            print(f"警告: 客户端 {self.cid} 没有训练数据")
+            return parameters, 0, {}
         
-    def fit(self, parameters, config):
-        """训练后将参数发送给协调者"""
-        try:
-            print(f"\n{'='*50}")
-            print(f"Client {self.cid}: 开始训练回合")
-            print(f"{'='*50}")
+        # 初始化优化器
+        if self.optimizer is None:
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01)
+        
+        # 训练模型
+        self.model.train()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        
+        for data, target in self.train_loader:
+            data, target = data.to(self.device), target.to(self.device)
+            self.optimizer.zero_grad()
+            output = self.model(data)
+            loss = F.cross_entropy(output, target)
+            loss.backward()
+            self.optimizer.step()
             
-            # 检查通信窗口
-            if not self._wait_for_communication_window():
-                print(f"❌ Client {self.cid}: 无法建立通信连接")
-                return parameters, 1, {}  # 返回原始参数而不是抛出异常
+            total_loss += loss.item()
+            pred = output.argmax(dim=1, keepdim=True)
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            total += target.size(0)
             
-            # 设置模型参数
-            self.set_parameters(parameters)
-            
-            # 训练模型
-            optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-            loss, accuracy = train(self.model, self.train_loader, optimizer, self.device, epochs=1)
-            
-            print(f"Client {self.cid}: 训练完成 - Loss: {loss:.4f}, Accuracy: {accuracy:.4f}")
-            
-            # 获取更新后的参数
-            updated_parameters = self.get_parameters({})
-            
-            # 如果是轨道内节点且有协调者，发送参数给协调者
-            if self.coordinator and self._check_orbit_visibility(self.coordinator):
-                self.coordinator.collect_parameters(
-                    updated_parameters,
-                    len(self.train_loader.dataset),
-                    {
-                        "loss": float(loss),
-                        "accuracy": float(accuracy)
-                    }
-                )
-                print(f"Client {self.cid}: 参数已发送给协调者 {self.coordinator.cid}")
-                return parameters, 1, {}  # 返回原始参数，避免服务器聚合
-                
-            return updated_parameters, len(self.train_loader.dataset), {
-                "loss": float(loss),
-                "accuracy": float(accuracy)
-            }
-            
-        except Exception as e:
-            print(f"Client {self.cid}: 训练错误 - {str(e)}")
-            self._save_checkpoint()
-            return parameters, 1, {}  # 出错时返回原始参数
+        accuracy = correct / total
+        avg_loss = total_loss / len(self.train_loader)
+        
+        print(f"客户端 {self.cid} 训练完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
+        
+        # 返回 Parameters 对象而不是列表
+        parameters = fl.common.ndarrays_to_parameters(
+            [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+        )
+        
+        return parameters, total, {
+            "accuracy": float(accuracy),
+            "loss": float(avg_loss)
+        }
 
     def evaluate(self, parameters, config):
         """评估模型"""
         try:
-            print(f"Client {self.cid}: 开始评估")
+            # 先将 Parameters 对象转换为 numpy 数组列表
+            parameters_arrays = fl.common.parameters_to_ndarrays(parameters)
+            self.set_parameters(parameters_arrays)
             
-            # 检查通信窗口
-            if not self._wait_for_communication_window():
-                print(f"Client {self.cid}: 无法建立通信连接")
-                raise CommunicationError("无可用通信窗口")
+            if self.test_loader is None:
+                print(f"警告: 客户端 {self.cid} 没有测试数据")
+                return None
             
-            # 设置模型参数
-            self.set_parameters(parameters)
+            # 设置评估模式
+            self.model.eval()
+            total_loss = 0.0
+            total_examples = 0
+            correct = 0
             
-            # 评估模型
-            loss, accuracy = test(self.model, self.test_loader, self.device)
+            with torch.no_grad():
+                for data, target in self.test_loader:
+                    data, target = data.to(self.device), target.to(self.device)
+                    output = self.model(data)
+                    loss = F.cross_entropy(output, target)
+                    
+                    total_loss += loss.item() * len(data)
+                    total_examples += len(data)
+                    pred = output.argmax(dim=1, keepdim=True)
+                    correct += pred.eq(target.view_as(pred)).sum().item()
             
-            print(f"Client {self.cid}: 评估完成 - Loss: {loss:.4f}, Accuracy: {accuracy:.4f}")
+            # 计算指标
+            accuracy = correct / total_examples
+            avg_loss = total_loss / total_examples
             
-            # 检查是否仍在通信窗口内
-            if not self.orbit_calculator.calculate_visibility(self.current_ground_station, datetime.now()):
-                print(f"Client {self.cid}: 通信窗口已关闭，等待下一个窗口")
-                if not self._wait_for_communication_window():
-                    raise CommunicationError("无法发送评估结果")
-            
-            return float(loss), len(self.test_loader.dataset), {
-                "accuracy": float(accuracy)
+            metrics = {
+                "accuracy": float(accuracy),
+                "loss": float(avg_loss)
             }
             
+            print(f"客户端 {self.cid} 评估完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
+            
+            return float(total_loss), total_examples, metrics
+            
         except Exception as e:
-            print(f"Client {self.cid}: 评估错误 - {str(e)}")
-            raise
-    
-    def set_parameters(self, parameters):
-        """设置模型参数"""
-        try:
-            params_dict = zip(self.model.state_dict().keys(), parameters)
-            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-            self.model.load_state_dict(state_dict, strict=True)
-        except Exception as e:
-            print(f"Client {self.cid}: Error setting parameters - {str(e)}")
-            raise
-    
-    def get_parameters(self, config):
-        """获取模型参数"""
-        try:
-            return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
-        except Exception as e:
-            print(f"Client {self.cid}: Error getting parameters - {str(e)}")
-            raise
+            print(f"客户端 {self.cid} 评估失败: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            return None
 
 class AsyncSatelliteClient(fl.client.NumPyClient):
     async def _train_async(self):

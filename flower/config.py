@@ -13,20 +13,22 @@ class GroundStationConfig:
 class SatelliteConfig:
     def __init__(
         self,
-        orbit_altitude: float,
-        orbit_inclination: float,
-        orbital_period: float,
-        ground_stations: List[GroundStationConfig],
-        ascending_node: float,
-        mean_anomaly: float,
-        orbit_id: int,           # 新增：轨道ID
-        is_coordinator: bool     # 新增：是否为协调者节点
+        orbit_altitude: float = 550.0,
+        orbit_inclination: float = 97.6,
+        orbital_period: float = 95.0,
+        ground_stations: List[GroundStationConfig] = None,
+        ascending_node: float = 0.0,
+        mean_anomaly: float = 0.0,
+        orbit_id: int = 0,
+        sat_id: int = 0,
+        is_coordinator: bool = False
     ):
         self.orbit_altitude = orbit_altitude
         self.orbit_inclination = orbit_inclination
         self.orbital_period = orbital_period
-        self.ground_stations = ground_stations
+        self.ground_stations = ground_stations or []
         self.ascending_node = ascending_node
         self.mean_anomaly = mean_anomaly
         self.orbit_id = orbit_id
+        self.sat_id = sat_id
         self.is_coordinator = is_coordinator 
