@@ -1,134 +1,118 @@
 # server.py
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
 import asyncio
-import websockets
-import json
-from .config import SatelliteConfig, GroundStationConfig
+from datetime import datetime
+from typing import Dict, List, Optional
+import numpy as np
+from .config import SatelliteConfig
 from .scheduler import Scheduler, Task
-from .monitor import Monitor, SatelliteStatus, LinkQuality
+from .monitor import Monitor, LinkQuality
+import json
+import websockets
 
 class SatelliteServer:
-    def __init__(self, config: SatelliteConfig):
-        self.config = config
-        self.scheduler = Scheduler(config)
-        self.monitor = Monitor(config)
-        self.clients: Dict[str, websockets.WebSocketServerProtocol] = {}
+    """卫星服务器"""
+    def __init__(self, scheduler: Scheduler, monitor: Monitor, host: str = "localhost", port: int = 8765):
+        self.scheduler = scheduler
+        self.monitor = monitor
+        self.model = None
+        self.current_round = 0
+        self.host = host
+        self.port = port
+        self.clients = {}  # 存储连接的客户端
         
-    async def start(self, host: str = "localhost", port: int = 8765):
-        """启动服务器"""
-        server = await websockets.serve(self.handle_connection, host, port)
-        print(f"服务器启动在 ws://{host}:{port}")
-        await server.wait_closed()
+    def set_model(self, model: Dict):
+        """设置初始模型"""
+        self.model = model.copy()  # 创建副本
         
-    async def handle_connection(self, websocket):
-        """处理新的连接"""
-        try:
-            # 等待客户端注册
-            message = await websocket.recv()
-            data = json.loads(message)
-            client_id = data.get("client_id")
-            
-            if not client_id:
-                await websocket.close(1002, "需要client_id")
-                return
-                
-            # 注册客户端
-            self.clients[client_id] = websocket
-            print(f"客户端 {client_id} 已连接")
-            
-            try:
-                async for message in websocket:
-                    await self.handle_message(client_id, message)
-            finally:
-                # 客户端断开连接
-                del self.clients[client_id]
-                print(f"客户端 {client_id} 已断开连接")
-                
-        except Exception as e:
-            print(f"连接错误: {e}")
-            
-    async def handle_message(self, client_id: str, message: str):
-        """处理客户端消息"""
-        try:
-            data = json.loads(message)
-            message_type = data.get("type")
-            
-            if message_type == "status_update":
-                # 更新卫星状态
-                status = SatelliteStatus(
-                    timestamp=datetime.now(),
-                    position=tuple(data["position"]),
-                    velocity=tuple(data["velocity"]),
-                    battery_level=data["battery_level"],
-                    temperature=data["temperature"],
-                    memory_usage=data["memory_usage"]
-                )
-                self.monitor.update_satellite_status(status)
-                
-            elif message_type == "request_window":
-                # 请求通信窗口
-                windows = self.scheduler.predict_windows(
-                    start_time=datetime.now(),
-                    duration_hours=24
-                )
-                response = {
-                    "type": "window_response",
-                    "windows": [
-                        {
-                            "station_id": w.station_id,
-                            "start_time": w.start_time.isoformat(),
-                            "end_time": w.end_time.isoformat(),
-                            "max_elevation": w.max_elevation,
-                            "min_distance": w.min_distance
-                        }
-                        for w in windows
-                    ]
-                }
-                await self.clients[client_id].send(json.dumps(response))
-                
-            elif message_type == "link_quality":
-                # 记录链路质量
-                quality = LinkQuality(
-                    snr=data["snr"],
-                    bit_error_rate=data["bit_error_rate"],
-                    throughput=data["throughput"]
-                )
-                self.monitor.record_link_quality(data["station_id"], quality)
-                
-            elif message_type == "add_task":
-                # 添加新任务
+    async def start_training(self, model: Dict, satellites: List[SatelliteConfig]):
+        """开始训练"""
+        self.model = model
+        self.current_round = 0
+        
+        while self.current_round < 3:  # 将轮次减少到3
+            # 创建分发任务
+            tasks = []
+            for sat in satellites:
                 task = Task(
-                    task_id=data["task_id"],
-                    duration=data["duration"],
-                    priority=data["priority"],
-                    station_id=data["station_id"],
-                    deadline=datetime.fromisoformat(data["deadline"])
+                    task_id=f"round_{self.current_round}_sat_{sat.sat_id}",
+                    satellite_id=sat.sat_id,
+                    start_time=datetime.now(),
+                    duration=60.0  # 1分钟
                 )
-                self.scheduler.add_task(task)
+                tasks.append(task)
                 
-        except Exception as e:
-            print(f"处理消息错误: {e}")
+            # 调度任务
+            scheduled_tasks = self.scheduler.schedule_tasks()
             
-    async def broadcast_status(self):
-        """广播系统状态"""
-        while True:
-            try:
-                status = {
-                    "type": "system_status",
-                    "time": datetime.now().isoformat(),
-                    "active_clients": len(self.clients),
-                    "satellite_health": self.monitor.get_satellite_health()
-                }
+            # 等待任务完成
+            await asyncio.sleep(1.0)
+            
+            self.current_round += 1
+            
+    def aggregate_models(self, models: List[Dict]) -> Dict:
+        """聚合模型"""
+        if not models:
+            return self.model.copy() if self.model else {}
+            
+        aggregated = {}
+        for key in self.model.keys():
+            params = [m[key] for m in models]
+            aggregated[key] = np.mean(params, axis=0)
+            
+        return aggregated
+
+    async def start_server(self):
+        """启动WebSocket服务器"""
+        async with websockets.serve(self.handle_connection, self.host, self.port):
+            print(f"服务器启动在 ws://{self.host}:{self.port}")
+            await asyncio.Future()  # 保持服务器运行
+            
+    async def handle_connection(self, websocket, path=None):
+        """处理WebSocket连接"""
+        try:
+            client_id = None
+            async for message in websocket:
+                data = json.loads(message)
                 
-                # 向所有客户端广播
-                for client in self.clients.values():
-                    try:
-                        await client.send(json.dumps(status))
-                    except:
-                        continue
+                if data.get("type") == "register":
+                    # 客户端注册
+                    client_id = data["client_id"]
+                    self.clients[client_id] = websocket
+                    await self.send_response(websocket, {
+                        "type": "register_response",
+                        "status": "success"
+                    })
+                    
+                elif data.get("type") == "status_update":
+                    # 更新卫星状态
+                    if client_id:
+                        self.monitor.update_satellite_status(client_id, data)
                         
-            except Exception as e:
-                print(f"广播错误: {e}")
-                
-            await asyncio.sleep(5)  # 每5秒广播一次
+                elif data.get("type") == "request_task":
+                    # 请求任务
+                    if client_id:
+                        task = self.scheduler.get_next_task(client_id)
+                        await self.send_response(websocket, {
+                            "type": "task_response",
+                            "task": task.to_dict() if task else None
+                        })
+                        
+        except websockets.exceptions.ConnectionClosed:
+            if client_id and client_id in self.clients:
+                del self.clients[client_id]
+        except Exception as e:
+            print(f"连接处理错误: {str(e)}")
+            
+    async def send_response(self, websocket, data):
+        """发送响应"""
+        try:
+            await websocket.send(json.dumps(data))
+        except Exception as e:
+            print(f"发送响应错误: {str(e)}")
+
+async def start_server(model: Dict, satellites: List[SatelliteConfig]):
+    """启动服务器"""
+    scheduler = Scheduler(None)  # TODO: 添加轨道计算器
+    monitor = Monitor()
+    server = SatelliteServer(scheduler, monitor)
+    await server.start_training(model, satellites)

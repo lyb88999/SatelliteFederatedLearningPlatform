@@ -1,28 +1,45 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Union
 from datetime import datetime
 
 @dataclass
 class GroundStationConfig:
-    station_id: str
-    latitude: float
-    longitude: float
-    coverage_radius: float = 3000  # 增加覆盖半径
-    min_elevation: float = 5.0  # 降低最小仰角要求
+    def __init__(
+        self,
+        station_id: str,
+        latitude: float,
+        longitude: float,
+        max_range: float,
+        min_elevation: float,
+        max_satellites: int = 4  # 最大同时可见卫星数
+    ):
+        self.station_id = station_id
+        self.latitude = latitude    # 纬度（度）
+        self.longitude = longitude  # 经度（度）
+        self.max_range = max_range  # 最大通信距离（km）
+        self.min_elevation = min_elevation  # 最小仰角（度）
+        self.max_satellites = max_satellites  # 最大同时可见卫星数
 
 @dataclass
 class SatelliteConfig:
-    orbit_id: int
-    sat_id: int
-    is_coordinator: bool = False
-    
-    # 轨道参数
-    semi_major_axis: float = 7000.0  # 半长轴(km)
-    eccentricity: float = 0.0        # 偏心率
-    inclination: float = 98.0        # 倾角(度)
-    raan: float = 0.0                # 升交点赤经(度)
-    arg_perigee: float = 0.0         # 近地点幅角(度)
-    epoch: datetime = field(default_factory=datetime.now)  # 历元
-    
-    # 通信参数
-    max_communication_distance: float = 1000.0  # 最大通信距离(km) 
+    """卫星配置"""
+    def __init__(self,
+                 orbit_id: int,
+                 sat_id: int,
+                 semi_major_axis: float,
+                 eccentricity: float,
+                 inclination: float,
+                 raan: float,
+                 arg_perigee: float,
+                 epoch: datetime):
+        self.orbit_id = orbit_id
+        self.sat_id = sat_id
+        self.semi_major_axis = semi_major_axis
+        self.eccentricity = eccentricity
+        self.inclination = inclination
+        self.raan = raan
+        self.arg_perigee = arg_perigee
+        self.epoch = epoch
+        self.max_communication_distance: float = 1000.0
+        self.ground_stations: List[GroundStationConfig] = field(default_factory=list)
+        self.is_coordinator: bool = False 

@@ -1,40 +1,55 @@
-from datetime import datetime, timedelta
-from typing import Dict, List
+from dataclasses import dataclass
+from datetime import datetime
+from typing import List, Optional, Dict
+from .config import SatelliteConfig
 from .orbit_utils import OrbitCalculator
 
-class TrainingWindow:
-    def __init__(self, start_time: datetime, duration: timedelta, coordinator_id: str, priority: int):
-        self.start_time = start_time
-        self.duration = duration
-        self.coordinator_id = coordinator_id
-        self.priority = priority
+@dataclass
+class CommunicationWindow:
+    """通信窗口"""
+    start_time: datetime
+    end_time: datetime
+    satellite: SatelliteConfig
+    quality: float  # 链路质量（0-1）
 
-class TrainingScheduler:
+@dataclass
+class Task:
+    """任务定义"""
+    task_id: str
+    satellite_id: Optional[str]  # 可以为 None，等待分配
+    start_time: datetime
+    duration: float  # 秒
+    priority: int = 1
+    status: str = "pending"  # pending, running, completed, failed
+    station_id: Optional[str] = None  # 添加这行
+    deadline: Optional[datetime] = None  # 添加这行
+
+class Scheduler:
+    """任务调度器"""
     def __init__(self, orbit_calculator: OrbitCalculator):
         self.orbit_calculator = orbit_calculator
-    
-    def create_training_schedule(
-        self,
-        satellites: List,
-        coordinators: Dict[int, str],
-        resource_states: Dict[str, Dict],
-        start_time: datetime,
-        duration_hours: int
-    ) -> Dict[str, List[TrainingWindow]]:
-        """创建训练调度计划"""
-        schedule = {}
-        window_duration = timedelta(minutes=5)  # 默认5分钟的训练窗口
+        self.tasks: List[Task] = []
+        self.windows: Dict[str, List[CommunicationWindow]] = {}
         
-        for sat in satellites:
-            if not sat.is_coordinator:
-                schedule[f"orbit_{sat.orbit_id}_sat_{sat.sat_id}"] = [
-                    TrainingWindow(
-                        start_time=start_time + timedelta(minutes=10*i),
-                        duration=window_duration,
-                        coordinator_id=coordinators[sat.orbit_id],
-                        priority=1
-                    )
-                    for i in range(6)  # 每个卫星6个训练窗口
-                ]
+    def add_task(self, task: Task):
+        """添加任务到调度器"""
+        self.tasks.append(task)
         
-        return schedule 
+    def get_communication_windows(self, satellite: SatelliteConfig, 
+                                start_time: datetime, duration: float) -> List[CommunicationWindow]:
+        """获取通信窗口"""
+        # TODO: 实现通信窗口计算
+        return []
+        
+    def schedule_tasks(self) -> List[Task]:
+        """调度任务"""
+        # 按优先级排序
+        self.tasks.sort(key=lambda x: (-x.priority, x.start_time))
+        return self.tasks
+        
+    def update_task_status(self, task_id: str, status: str):
+        """更新任务状态"""
+        for task in self.tasks:
+            if task.task_id == task_id:
+                task.status = status
+                break 

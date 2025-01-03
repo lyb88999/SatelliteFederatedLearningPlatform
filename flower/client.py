@@ -3,9 +3,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torchvision import datasets, transforms
 import flwr as fl
+from flwr.common import (
+    FitRes,
+    Parameters,
+    parameters_to_ndarrays,
+    ndarrays_to_parameters,
+)
 import numpy as np
 from collections import OrderedDict
 from typing import Dict, List, Tuple, Optional
@@ -40,8 +46,9 @@ class CommunicationWindowExceeded(SatelliteError):
 
 # 定义CNN模型
 class Net(nn.Module):
+    """简单的神经网络模型"""
     def __init__(self):
-        super(Net, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
         self.dropout1 = nn.Dropout(0.25)
@@ -257,147 +264,161 @@ def create_model() -> nn.Module:
     return Net()  # 使用之前定义的 Net 类
 
 # 然后定义 SatelliteFlowerClient 类
-class SatelliteFlowerClient(fl.client.Client):
-    """卫星端 Flower 客户端"""
-    
-    def __init__(self, cid: str, model: OrderedDict, config: SatelliteConfig, 
-                 train_loader=None, test_loader=None, device=None):
-        self.cid = cid
-        self.model = model
-        self.config = config
-        self.optimizer = None
-        self.train_loader = train_loader
-        self.test_loader = test_loader
-        self.device = device if device is not None else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.training_progress = {}
+class SatelliteFlowerClient:
+    """卫星联邦学习客户端"""
+    def __init__(self, 
+                 satellite_id: int,
+                 train_dataset: Dataset,
+                 test_dataset: Dataset,
+                 device: torch.device,
+                 batch_size: int = 32,
+                 epochs: int = 1):
+        """初始化客户端
         
-        # 如果是协调者，不需要训练和测试数据
-        if self.config.is_coordinator:
-            self.train_loader = None
-            self.test_loader = None
-            
-    def get_parameters(self, config: Dict[str, str]) -> fl.common.NDArrays:
-        """获取模型参数"""
-        return [val.cpu().numpy() for val in self.model.state_dict().values()]
+        Args:
+            satellite_id: 卫星ID
+            train_dataset: 训练数据集
+            test_dataset: 测试数据集
+            device: 训练设备（CPU/GPU）
+            batch_size: 批次大小
+            epochs: 每轮本地训练的轮数
+        """
+        self.satellite_id = satellite_id
+        self.device = device
+        self.batch_size = batch_size
+        self.epochs = epochs
         
-    def set_parameters(self, parameters: fl.common.NDArrays) -> None:
-        """设置模型参数"""
-        params_dict = zip(self.model.state_dict().keys(), parameters)
-        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-        self.model.load_state_dict(state_dict)
+        # 保存数据集
+        self.train_dataset = train_dataset
+        self.test_dataset = test_dataset
         
-    def receive_model(self, parameters) -> None:
-        """接收模型参数（协调者专用）"""
-        if not self.config.is_coordinator:
-            raise ValueError(f"客户端 {self.cid} 不是协调者，无法接收模型")
-            
-        # 将参数转换为 numpy 数组列表
-        parameters_arrays = fl.common.parameters_to_ndarrays(parameters)
-        # 设置模型参数
-        self.set_parameters(parameters_arrays)
+        # 创建数据加载器
+        self.train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True
+        )
         
-    def fit(self, parameters, config):
+        self.test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False
+        )
+        
+        # 初始化模型
+        self.model = Net().to(device)
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.SGD(
+            self.model.parameters(),
+            lr=0.1,  # 增大学习率
+            momentum=0.9,  # 添加动量
+            weight_decay=1e-4  # 添加权重衰减
+        )
+        
+        # 添加学习率调度器
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer, 
+            step_size=1, 
+            gamma=0.98
+        )
+        
+    async def train(self) -> Tuple[int, Dict[str, float]]:
         """训练模型"""
-        try:
-            # 设置模型参数
-            params_dict = zip(self.model.state_dict().keys(), fl.common.parameters_to_ndarrays(parameters))
-            state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-            self.model.load_state_dict(state_dict)
+        if self.model is None:
+            return 0, {}
+        
+        self.model.train()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        n_batches = 0
+        
+        for data, target in self.train_loader:
+            data, target = data.to(self.device), target.to(self.device)
+            self.optimizer.zero_grad()
+            output = self.model(data)
+            loss = F.cross_entropy(output, target)
+            loss.backward()
             
-            if self.train_loader is None:
-                print(f"警告: 客户端 {self.cid} 没有训练数据")
-                return None
+            # 计算准确率
+            pred = output.argmax(dim=1, keepdim=True)
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            total += len(data)
             
-            # 设置训练模式
-            self.model.train()
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             
-            # 创建优化器
-            optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+            self.optimizer.step()
+            total_loss += loss.item()
+            n_batches += 1
             
-            # 训练一个epoch
-            total_loss = 0.0
-            total_examples = 0
-            correct = 0
-            
-            for data, target in self.train_loader:
-                data, target = data.to(self.device), target.to(self.device)
-                optimizer.zero_grad()
-                output = self.model(data)
-                loss = F.cross_entropy(output, target)
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item() * len(data)
-                total_examples += len(data)
-                pred = output.argmax(dim=1, keepdim=True)
-                correct += pred.eq(target.view_as(pred)).sum().item()
-            
-            # 计算指标
-            accuracy = correct / total_examples
-            avg_loss = total_loss / total_examples
-            
-            print(f"客户端 {self.cid} 训练完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
-            
-            # 返回更新后的模型参数
-            return [
-                val.cpu().numpy() for val in self.model.state_dict().values()
-            ], total_examples, {
-                "accuracy": float(accuracy),
-                "loss": float(avg_loss)
-            }
-            
-        except Exception as e:
-            print(f"客户端 {self.cid} 训练失败: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            return None
-
-    def evaluate(self, parameters, config):
+            if n_batches % 10 == 0:
+                print(f"Epoch 1/1 [{n_batches*len(data)}/{len(self.train_loader.dataset)} "
+                      f"({100. * n_batches / len(self.train_loader):.0f}%)] "
+                      f"Loss: {loss.item():.6f}")
+        
+        # 更新学习率
+        self.scheduler.step()
+        
+        avg_loss = total_loss / n_batches
+        accuracy = correct / total if total > 0 else 0.0
+        
+        print(f"客户端 orbit_{self.satellite_id//11}_sat_{self.satellite_id%11} "
+              f"训练完成: loss={avg_loss:.4f}, accuracy={accuracy:.4f}")
+          
+        return len(self.train_loader.dataset), {
+            "loss": avg_loss,
+            "accuracy": accuracy
+        }
+        
+    async def evaluate(self) -> Tuple[int, Dict[str, float]]:
         """评估模型"""
+        if self.model is None:
+            return 0, {'accuracy': 0.0, 'loss': float('inf')}
+        
+        self.model.eval()
+        correct = 0
+        total = 0
+        loss = 0.0
+        
         try:
-            # 先将 Parameters 对象转换为 numpy 数组列表
-            parameters_arrays = fl.common.parameters_to_ndarrays(parameters)
-            self.set_parameters(parameters_arrays)
-            
-            if self.test_loader is None:
-                print(f"警告: 客户端 {self.cid} 没有测试数据")
-                return None
-            
-            # 设置评估模式
-            self.model.eval()
-            total_loss = 0.0
-            total_examples = 0
-            correct = 0
-            
             with torch.no_grad():
-                for data, target in self.test_loader:
+                for data, target in self.test_loader:  # 使用 test_loader 而不是重新创建
                     data, target = data.to(self.device), target.to(self.device)
                     output = self.model(data)
-                    loss = F.cross_entropy(output, target)
-                    
-                    total_loss += loss.item() * len(data)
-                    total_examples += len(data)
+                    loss += F.cross_entropy(output, target, reduction='sum').item()
                     pred = output.argmax(dim=1, keepdim=True)
                     correct += pred.eq(target.view_as(pred)).sum().item()
+                    total += len(data)
             
-            # 计算指标
-            accuracy = correct / total_examples
-            avg_loss = total_loss / total_examples
+            # 避免除零错误
+            if total > 0:
+                accuracy = correct / total
+                avg_loss = loss / total
+            else:
+                accuracy = 0.0
+                avg_loss = float('inf')
             
-            metrics = {
-                "accuracy": float(accuracy),
-                "loss": float(avg_loss)
+            print(f"客户端 orbit_{self.satellite_id//11}_sat_{self.satellite_id%11} "
+                  f"评估完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
+                  
+            return total, {
+                'accuracy': accuracy,
+                'loss': avg_loss
             }
             
-            print(f"客户端 {self.cid} 评估完成: accuracy={accuracy:.4f}, loss={avg_loss:.4f}")
-            
-            return float(total_loss), total_examples, metrics
-            
         except Exception as e:
-            print(f"客户端 {self.cid} 评估失败: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            return None
+            print(f"客户端评估错误: {str(e)}")
+            return 0, {
+                'accuracy': 0.0,
+                'loss': float('inf')
+            }
+        
+    async def set_model(self, parameters: Parameters) -> None:
+        """设置模型参数"""
+        params_dict = zip(self.model.state_dict().keys(), parameters_to_ndarrays(parameters))
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
 
 class AsyncSatelliteClient(fl.client.NumPyClient):
     async def _train_async(self):

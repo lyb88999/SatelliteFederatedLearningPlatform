@@ -34,38 +34,33 @@ def create_ground_stations() -> List[GroundStationConfig]:
         GroundStationConfig("Cape Town", -33.9249, 18.4241, 2000, 10.0)
     ]
 
-def create_multi_orbit_satellites(
-    num_orbits: int = 3,
-    sats_per_orbit: int = 4
-) -> List[SatelliteConfig]:
+def create_multi_orbit_satellites(num_orbits: int = 3, sats_per_orbit: int = 4) -> List[SatelliteConfig]:
     """创建多轨道卫星网络"""
-    satellites = []
-    ground_stations = create_ground_stations()
+    orbit_calculator = OrbitCalculator(debug_mode=True)
+    earth_radius = orbit_calculator.earth_radius
     
-    # 轨道参数
-    base_altitude = 550.0  # km
-    base_inclination = 97.6  # degrees
+    satellites = []
     
     for orbit_id in range(num_orbits):
         # 每个轨道略微不同的参数
-        orbit_altitude = base_altitude + orbit_id * 50  # 轨道高度递增
-        orbit_inclination = base_inclination + orbit_id * 2  # 倾角递增
+        altitude = 550.0 + orbit_id * 50  # 轨道高度递增
         
         for sat_idx in range(sats_per_orbit):
             # 在轨道内均匀分布卫星
-            mean_anomaly = (360.0 / sats_per_orbit) * sat_idx
+            phase_angle = (360.0 / sats_per_orbit) * sat_idx
             
-            sat_config = SatelliteConfig(
-                orbit_altitude=orbit_altitude,
-                orbit_inclination=orbit_inclination,
-                orbital_period=95 + orbit_id * 2,  # 轨道周期略有不同
-                ground_stations=ground_stations,
-                ascending_node=orbit_id * 120.0,  # 轨道面均匀分布
-                mean_anomaly=mean_anomaly,
-                orbit_id=orbit_id,
-                is_coordinator=(sat_idx == 0)  # 每个轨道第一颗卫星作为协调者
+            satellites.append(
+                SatelliteConfig(
+                    orbit_id=orbit_id,
+                    sat_id=len(satellites),
+                    semi_major_axis=earth_radius + altitude,
+                    eccentricity=0.001,
+                    inclination=97.6 + orbit_id * 2,  # 倾角递增
+                    raan=orbit_id * 120.0,  # 轨道面均匀分布
+                    arg_perigee=phase_angle,
+                    epoch=datetime.now()
+                )
             )
-            satellites.append(sat_config)
     
     return satellites
 
@@ -142,7 +137,7 @@ def test_multi_orbit_visibility(large_scale_environment):
         for sat2 in env['satellites']:
             sat2_id = f"orbit_{sat2.orbit_id}"
             
-            is_visible = env['orbit_calculator'].calculate_satellite_visibility(
+            is_visible = env['orbit_calculator'].check_satellite_visibility(
                 sat1,
                 sat2,
                 current_time
@@ -172,7 +167,7 @@ def test_multi_orbit_visibility(large_scale_environment):
     for sat1 in env['satellites']:
         for sat2 in env['satellites']:
             if sat1.orbit_id == sat2.orbit_id and sat1 != sat2:
-                assert env['orbit_calculator'].calculate_satellite_visibility(
+                assert env['orbit_calculator'].check_satellite_visibility(
                     sat1,
                     sat2,
                     current_time
@@ -208,10 +203,12 @@ def test_multi_orbit_visibility(large_scale_environment):
         
         # 绘制轨道路径
         orbit_points = []
-        for t in range(0, 360, 5):
-            time = current_time + timedelta(minutes=t)
-            pos = env['orbit_calculator']._calculate_satellite_position(time)
-            orbit_points.append(pos)
+        for sat in sats:
+            env['orbit_calculator'].set_current_satellite(sat)  # 设置当前卫星
+            for t in range(0, 360, 5):
+                time = current_time + timedelta(minutes=t)
+                pos = env['orbit_calculator']._calculate_satellite_position(time)
+                orbit_points.append(pos)
         orbit_points = np.array(orbit_points)
         ax.plot(orbit_points[:, 0], orbit_points[:, 1], orbit_points[:, 2], 
                 '--', c=color, alpha=0.3)
@@ -225,7 +222,7 @@ def test_multi_orbit_visibility(large_scale_environment):
             
             # 绘制可见性连线
             for other_sat in sats:
-                if sat != other_sat and env['orbit_calculator'].calculate_satellite_visibility(
+                if sat != other_sat and env['orbit_calculator'].check_satellite_visibility(
                     sat, other_sat, current_time):
                     other_pos = env['orbit_calculator']._calculate_satellite_position(current_time)
                     ax.plot([pos[0], other_pos[0]], 
@@ -269,7 +266,7 @@ def test_large_scale_scheduling(large_scale_environment):
         task_priorities[sat_id] = 3 if sat.is_coordinator else np.random.randint(1, 3)
     
     # 生成调度计划
-    schedule = env['orbit_calculator'].adaptive_schedule(
+    schedule = env['orbit_calculator'].schedule_adaptive(
         satellites=env['satellites'],
         start_time=start_time,
         resource_states=resource_states,
@@ -324,7 +321,7 @@ def test_coordinator_network(large_scale_environment):
     start_time = datetime.now()
     
     # 测试每个轨道的协调者选择
-    coordinator_scores = env['orbit_calculator'].find_best_coordinator(
+    coordinator_scores = env['orbit_calculator'].select_best_coordinator(
         satellites=env['satellites'],
         start_time=start_time,
         duration_hours=24

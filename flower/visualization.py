@@ -1,162 +1,131 @@
-import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from datetime import datetime, timedelta
-from .config import SatelliteConfig, GroundStationConfig
-from .orbit_utils import OrbitCalculator
+import numpy as np
+from typing import Dict, List
+import os
 
-class OrbitVisualizer:
-    def __init__(self, orbit_calculator: OrbitCalculator):
-        self.calculator = orbit_calculator
-        self.earth_radius = orbit_calculator.earth_radius
+class FederatedLearningVisualizer:
+    def __init__(self, save_dir: str = "results"):
+        """初始化可视化器
         
-    def plot_orbit(self, duration_hours=24, step_minutes=1):
-        """绘制卫星轨道和地面站位置"""
-        # 创建3D图
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111, projection='3d')
+        Args:
+            save_dir: 保存图表的目录
+        """
+        self.save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
         
-        # 绘制地球
-        u = np.linspace(0, 2 * np.pi, 100)
-        v = np.linspace(0, np.pi, 100)
-        x = self.earth_radius * np.outer(np.cos(u), np.sin(v))
-        y = self.earth_radius * np.outer(np.sin(u), np.sin(v))
-        z = self.earth_radius * np.outer(np.ones(np.size(u)), np.cos(v))
-        ax.plot_surface(x, y, z, color='lightblue', alpha=0.3)
+        # 存储训练历史
+        self.satellite_history = {}  # 卫星级别的历史
+        self.orbit_history = {}      # 轨道级别的历史
+        self.global_history = {      # 全局级别的历史
+            'accuracy': [],
+            'loss': []
+        }
         
-        # 计算并绘制卫星轨道
-        current_time = datetime.now()
-        orbit_x, orbit_y, orbit_z = [], [], []
+    def update_satellite_metrics(self, round_num: int, satellite_id: int, metrics: Dict):
+        """更新单个卫星的指标"""
+        if satellite_id not in self.satellite_history:
+            self.satellite_history[satellite_id] = {
+                'accuracy': [],
+                'loss': []
+            }
         
-        for minutes in range(duration_hours * 60):
-            if minutes % step_minutes == 0:
-                time = current_time + timedelta(minutes=minutes)
-                pos = self.calculator._calculate_satellite_position(time)
-                orbit_x.append(pos[0])
-                orbit_y.append(pos[1])
-                orbit_z.append(pos[2])
+        self.satellite_history[satellite_id]['accuracy'].append(metrics.get('accuracy', 0))
+        self.satellite_history[satellite_id]['loss'].append(metrics.get('loss', 0))
         
-        ax.plot(orbit_x, orbit_y, orbit_z, 'r-', label='Satellite Orbit', alpha=0.5)
-        
-        # 绘制地面站
-        for station in self.calculator.config.ground_stations:
-            pos = self.calculator._calculate_ground_station_position(station, current_time)
-            ax.scatter(pos[0], pos[1], pos[2], c='g', marker='^', s=100,
-                      label=f'Ground Station: {station.station_id}')
+    def update_orbit_metrics(self, round_num: int, orbit_id: int, metrics: Dict):
+        """更新轨道级别的指标"""
+        if orbit_id not in self.orbit_history:
+            self.orbit_history[orbit_id] = {
+                'accuracy': [],
+                'loss': []
+            }
             
-            # 绘制覆盖范围（简化为圆锥）
-            self._plot_coverage_cone(ax, station, current_time)
+        self.orbit_history[orbit_id]['accuracy'].append(metrics.get('accuracy', 0))
+        self.orbit_history[orbit_id]['loss'].append(metrics.get('loss', 0))
         
-        # 设置图形属性
-        ax.set_xlabel('X (km)')
-        ax.set_ylabel('Y (km)')
-        ax.set_zlabel('Z (km)')
-        ax.set_title('Satellite Orbit and Ground Stations')
-        ax.legend()
+    def update_global_metrics(self, metrics: Dict):
+        """更新全局指标"""
+        self.global_history['accuracy'].append(metrics.get('accuracy', 0))
+        self.global_history['loss'].append(metrics.get('loss', 0))
         
-        # 设置坐标轴范围
-        max_range = self.earth_radius + self.calculator.config.orbit_altitude + 1000
-        ax.set_xlim([-max_range, max_range])
-        ax.set_ylim([-max_range, max_range])
-        ax.set_zlim([-max_range, max_range])
+    def plot_satellite_metrics(self):
+        """绘制所有卫星的性能指标"""
+        plt.figure(figsize=(15, 10))
         
-        plt.show()
-    
-    def _plot_coverage_cone(self, ax, station: GroundStationConfig, time: datetime):
-        """绘制地面站的覆盖范围"""
-        gs_pos = self.calculator._calculate_ground_station_position(station, time)
+        # 损失图
+        plt.subplot(2, 1, 1)
+        for sat_id, history in self.satellite_history.items():
+            plt.plot(history['loss'], label=f'Satellite {sat_id}')
+        plt.title('Satellite-level Loss over Rounds')
+        plt.xlabel('Round')
+        plt.ylabel('Loss')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True)
         
-        # 计算地面站的局部坐标系
-        lat = np.radians(station.latitude)
-        lon = np.radians(station.longitude)
+        # 准确率图
+        plt.subplot(2, 1, 2)
+        for sat_id, history in self.satellite_history.items():
+            plt.plot(history['accuracy'], label=f'Satellite {sat_id}')
+        plt.title('Satellite-level Accuracy over Rounds')
+        plt.xlabel('Round')
+        plt.ylabel('Accuracy')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True)
         
-        # 计算地面站的局部坐标轴
-        up = np.array(gs_pos) / np.linalg.norm(gs_pos)  # 天顶方向
-        east = np.array([-np.sin(lon), np.cos(lon), 0])  # 东向
-        north = np.cross(up, east)  # 北向
+        plt.tight_layout()
+        plt.savefig(f'{self.save_dir}/satellite_metrics.png', bbox_inches='tight')
+        plt.close()
         
-        # 创建旋转矩阵
-        R = np.vstack([north, east, up]).T
+    def plot_orbit_metrics(self):
+        """绘制所有轨道的性能指标"""
+        plt.figure(figsize=(15, 10))
         
-        # 计算覆盖圆锥
-        min_elevation = np.radians(station.min_elevation)
-        max_range = station.coverage_radius
-        cone_height = max_range * np.sin(min_elevation)
-        cone_radius = max_range * np.cos(min_elevation)
+        # 损失图
+        plt.subplot(2, 1, 1)
+        for orbit_id, history in self.orbit_history.items():
+            plt.plot(history['loss'], label=f'Orbit {orbit_id}')
+        plt.title('Orbit-level Loss over Rounds')
+        plt.xlabel('Round')
+        plt.ylabel('Loss')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True)
         
-        # 创建圆锥顶点
-        theta = np.linspace(0, 2*np.pi, 50)
-        r = np.linspace(0, cone_radius, 20)
-        theta, r = np.meshgrid(theta, r)
+        # 准确率图
+        plt.subplot(2, 1, 2)
+        for orbit_id, history in self.orbit_history.items():
+            plt.plot(history['accuracy'], label=f'Orbit {orbit_id}')
+        plt.title('Orbit-level Accuracy over Rounds')
+        plt.xlabel('Round')
+        plt.ylabel('Accuracy')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True)
         
-        # 计算圆锥表面点（在局部坐标系中）
-        x_local = r * np.cos(theta)
-        y_local = r * np.sin(theta)
-        z_local = (cone_height * r) / cone_radius
+        plt.tight_layout()
+        plt.savefig(f'{self.save_dir}/orbit_metrics.png', bbox_inches='tight')
+        plt.close()
         
-        # 转换到全局坐标系
-        points = np.stack([x_local.flatten(), y_local.flatten(), z_local.flatten()])
-        transformed = np.dot(R, points)
+    def plot_global_metrics(self):
+        """绘制全局性能指标"""
+        plt.figure(figsize=(15, 10))
         
-        # 重塑数组并添加地面站位置偏移
-        x_global = transformed[0].reshape(x_local.shape) + gs_pos[0]
-        y_global = transformed[1].reshape(y_local.shape) + gs_pos[1]
-        z_global = transformed[2].reshape(z_local.shape) + gs_pos[2]
+        # 损失图
+        plt.subplot(2, 1, 1)
+        plt.plot(self.global_history['loss'], 'b-', label='Global Loss')
+        plt.title('Global Loss over Rounds')
+        plt.xlabel('Round')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
         
-        # 绘制覆盖锥面
-        ax.plot_surface(x_global, y_global, z_global, alpha=0.1, color='green') 
-    
-    def animate_orbit(self, duration_hours=24):
-        """动态显示卫星轨道"""
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111, projection='3d')
+        # 准确率图
+        plt.subplot(2, 1, 2)
+        plt.plot(self.global_history['accuracy'], 'r-', label='Global Accuracy')
+        plt.title('Global Accuracy over Rounds')
+        plt.xlabel('Round')
+        plt.ylabel('Accuracy')
+        plt.legend()
+        plt.grid(True)
         
-        def update(frame):
-            ax.cla()  # 清除当前帧
-            
-            # 绘制地球
-            u = np.linspace(0, 2 * np.pi, 100)
-            v = np.linspace(0, np.pi, 100)
-            x = self.earth_radius * np.outer(np.cos(u), np.sin(v))
-            y = self.earth_radius * np.outer(np.sin(u), np.sin(v))
-            z = self.earth_radius * np.outer(np.ones(np.size(u)), np.cos(v))
-            ax.plot_surface(x, y, z, color='lightblue', alpha=0.3)
-            
-            # 计算当前卫星位置
-            current_time = datetime.now() + timedelta(minutes=frame)
-            sat_pos = self.calculator._calculate_satellite_position(current_time)
-            
-            # 绘制卫星轨迹（过去10分钟）
-            trail_x, trail_y, trail_z = [], [], []
-            for i in range(max(0, frame-10), frame+1):
-                time = datetime.now() + timedelta(minutes=i)
-                pos = self.calculator._calculate_satellite_position(time)
-                trail_x.append(pos[0])
-                trail_y.append(pos[1])
-                trail_z.append(pos[2])
-            
-            ax.plot(trail_x, trail_y, trail_z, 'r-', alpha=0.5)
-            ax.scatter(sat_pos[0], sat_pos[1], sat_pos[2], c='red', s=100, label='Satellite')
-            
-            # 绘制地面站和覆盖范围
-            for station in self.calculator.config.ground_stations:
-                pos = self.calculator._calculate_ground_station_position(station, current_time)
-                ax.scatter(pos[0], pos[1], pos[2], c='g', marker='^', s=100,
-                          label=f'Ground Station: {station.station_id}')
-                
-                # 检查可见性并绘制连线
-                if self.calculator.calculate_visibility(station, current_time):
-                    ax.plot([pos[0], sat_pos[0]], [pos[1], sat_pos[1]], [pos[2], sat_pos[2]],
-                           'g--', alpha=0.5)
-                
-                self._plot_coverage_cone(ax, station, current_time)
-            
-            # 设置视图
-            ax.set_xlim([-self.earth_radius*2, self.earth_radius*2])
-            ax.set_ylim([-self.earth_radius*2, self.earth_radius*2])
-            ax.set_zlim([-self.earth_radius*2, self.earth_radius*2])
-            ax.set_title(f'Time: {current_time.strftime("%H:%M:%S")}')
-        
-        from matplotlib.animation import FuncAnimation
-        anim = FuncAnimation(fig, update, frames=duration_hours*60, interval=50)
-        plt.show() 
+        plt.tight_layout()
+        plt.savefig(f'{self.save_dir}/global_metrics.png', bbox_inches='tight')
+        plt.close() 
