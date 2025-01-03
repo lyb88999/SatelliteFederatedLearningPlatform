@@ -266,61 +266,41 @@ def create_model() -> nn.Module:
 # 然后定义 SatelliteFlowerClient 类
 class SatelliteFlowerClient:
     """卫星联邦学习客户端"""
-    def __init__(self, 
-                 satellite_id: int,
-                 train_dataset: Dataset,
-                 test_dataset: Dataset,
-                 device: torch.device,
-                 batch_size: int = 32,
-                 epochs: int = 1):
-        """初始化客户端
-        
-        Args:
-            satellite_id: 卫星ID
-            train_dataset: 训练数据集
-            test_dataset: 测试数据集
-            device: 训练设备（CPU/GPU）
-            batch_size: 批次大小
-            epochs: 每轮本地训练的轮数
-        """
+    def __init__(
+        self,
+        satellite_id: int,
+        train_data: torch.utils.data.DataLoader,
+        test_data: torch.utils.data.DataLoader,
+        device: torch.device,
+        config: SatelliteConfig
+    ):
+        """初始化卫星客户端"""
         self.satellite_id = satellite_id
+        self.train_data = train_data
+        self.test_data = test_data
         self.device = device
-        self.batch_size = batch_size
-        self.epochs = epochs
-        
-        # 保存数据集
-        self.train_dataset = train_dataset
-        self.test_dataset = test_dataset
-        
-        # 创建数据加载器
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True
-        )
-        
-        self.test_loader = DataLoader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False
-        )
+        self.config = config
         
         # 初始化模型
         self.model = Net().to(device)
-        self.criterion = nn.CrossEntropyLoss()
+        
+        # 初始化优化器
         self.optimizer = torch.optim.SGD(
             self.model.parameters(),
-            lr=0.1,  # 增大学习率
-            momentum=0.9,  # 添加动量
-            weight_decay=1e-4  # 添加权重衰减
+            lr=0.1,
+            momentum=0.9,
+            weight_decay=1e-4
         )
         
-        # 添加学习率调度器
+        # 初始化学习率调度器
         self.scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optimizer, 
-            step_size=1, 
+            self.optimizer,
+            step_size=1,
             gamma=0.98
         )
+        
+        # 初始化资源监控器
+        self.resource_monitor = ResourceMonitor()
         
     async def train(self) -> Tuple[int, Dict[str, float]]:
         """训练模型"""
@@ -333,7 +313,7 @@ class SatelliteFlowerClient:
         total = 0
         n_batches = 0
         
-        for data, target in self.train_loader:
+        for data, target in self.train_data:
             data, target = data.to(self.device), target.to(self.device)
             self.optimizer.zero_grad()
             output = self.model(data)
@@ -353,8 +333,8 @@ class SatelliteFlowerClient:
             n_batches += 1
             
             if n_batches % 10 == 0:
-                print(f"Epoch 1/1 [{n_batches*len(data)}/{len(self.train_loader.dataset)} "
-                      f"({100. * n_batches / len(self.train_loader):.0f}%)] "
+                print(f"Epoch 1/1 [{n_batches*len(data)}/{len(self.train_data.dataset)} "
+                      f"({100. * n_batches / len(self.train_data):.0f}%)] "
                       f"Loss: {loss.item():.6f}")
         
         # 更新学习率
@@ -366,7 +346,7 @@ class SatelliteFlowerClient:
         print(f"客户端 orbit_{self.satellite_id//11}_sat_{self.satellite_id%11} "
               f"训练完成: loss={avg_loss:.4f}, accuracy={accuracy:.4f}")
           
-        return len(self.train_loader.dataset), {
+        return len(self.train_data.dataset), {
             "loss": avg_loss,
             "accuracy": accuracy
         }
@@ -383,7 +363,7 @@ class SatelliteFlowerClient:
         
         try:
             with torch.no_grad():
-                for data, target in self.test_loader:  # 使用 test_loader 而不是重新创建
+                for data, target in self.test_data:  # 使用 test_data 而不是重新创建
                     data, target = data.to(self.device), target.to(self.device)
                     output = self.model(data)
                     loss += F.cross_entropy(output, target, reduction='sum').item()
@@ -430,9 +410,9 @@ class AsyncSatelliteClient(fl.client.NumPyClient):
                 
             # 训练过程
             optimizer = optim.Adam(self.model.parameters(), lr=0.001)
-            loss, accuracy = train(self.model, self.train_loader, optimizer, self.device, epochs=1)
+            loss, accuracy = train(self.model, self.train_data, optimizer, self.device, epochs=1)
             
-            return self.get_parameters({}), len(self.train_loader.dataset), {
+            return self.get_parameters({}), len(self.train_data.dataset), {
                 "loss": float(loss),
                 "accuracy": float(accuracy)
             }
@@ -549,8 +529,8 @@ def start_client(cid: int, orbit_id: int, is_coordinator: bool = False):
         client = SatelliteFlowerClient(
             cid=cid,
             model=model,
-            train_loader=train_loader,
-            test_loader=test_loader,
+            train_data=train_loader,
+            test_data=test_loader,
             device=device,
             config=satellite_config
         )

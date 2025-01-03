@@ -5,8 +5,10 @@ import numpy as np
 from flower.config import SatelliteConfig, GroundStationConfig
 from flower.orbit_utils import OrbitCalculator
 from flower.ground_station import GroundStation
-from flower.fl_server import SatelliteFlowerServer
-from flower.client import SatelliteFlowerClient
+from flower.fl_server import SatelliteFlowerServer, SatelliteFedAvg
+from flower.client import SatelliteFlowerClient, Net
+from flower.group_strategy import GroupedSatelliteFedAvg
+from flower.visualization import FederatedLearningVisualizer
 from torchvision import datasets, transforms
 
 async def create_iridium_constellation(orbit_calculator=None):
@@ -39,7 +41,7 @@ async def create_iridium_constellation(orbit_calculator=None):
             ))
     
     print(f"创建了 {len(satellites)} 颗卫星")
-    return satellites, orbit_calculator
+    return satellites  # 只返回卫星列表
 
 async def create_ground_stations(orbit_calculator):
     """创建地面站"""
@@ -115,48 +117,121 @@ async def create_clients(satellites, train_dataset, test_dataset):
         # 创建客户端
         client = SatelliteFlowerClient(
             satellite_id=sat.sat_id,
-            train_dataset=train_subset,
-            test_dataset=test_subset,
+            train_data=train_subset,
+            test_data=test_subset,
             device=device
         )
         clients.append(client)
     
     return clients
 
-async def run_simulation():
-    """运行铱星联邦学习仿真"""
+async def run_simulation(use_grouping: bool = False):
+    """运行铱星星座联邦学习仿真"""
     try:
-        # 1. 创建星座
-        orbit_calculator = OrbitCalculator(debug_mode=True)  # 设置为调试模式
-        satellites, _ = await create_iridium_constellation(orbit_calculator)
+        # 创建铱星星座
+        orbit_calculator = OrbitCalculator(debug_mode=True)
+        satellites = await create_iridium_constellation(orbit_calculator)  # 不再解包返回值
         
-        # 2. 创建地面站
-        ground_stations = await create_ground_stations(orbit_calculator)
+        # 创建地面站配置
+        station_configs = [
+            GroundStationConfig("Beijing", 39.9042, 116.4074, 2000, 10.0),
+            GroundStationConfig("NewYork", 40.7128, -74.0060, 2000, 10.0),
+            GroundStationConfig("London", 51.5074, -0.1278, 2000, 10.0),
+            GroundStationConfig("Sydney", -33.8688, 151.2093, 2000, 10.0),
+            GroundStationConfig("Moscow", 55.7558, 37.6173, 2000, 10.0),
+            GroundStationConfig("SaoPaulo", -23.5505, -46.6333, 2000, 10.0)
+        ]
         
-        # 3. 加载数据集
-        train_dataset, test_dataset = await load_dataset()
+        # 创建可视化器
+        visualizer = FederatedLearningVisualizer(save_dir="results")
         
-        # 4. 创建客户端
-        clients = await create_clients(satellites, train_dataset, test_dataset)
+        # 创建策略
+        if use_grouping:
+            strategy = GroupedSatelliteFedAvg(
+                visualizer=visualizer,
+                group_size=3,
+                use_grouping=True
+            )
+        else:
+            strategy = SatelliteFedAvg(visualizer=visualizer)
         
-        # 5. 创建服务器
-        num_rounds = 10  # 增加训练轮数
+        # 创建服务器
         server = SatelliteFlowerServer(
-            satellites=satellites,
-            ground_stations=ground_stations,
+            strategy=strategy,
             orbit_calculator=orbit_calculator,
-            num_rounds=num_rounds
+            ground_stations=station_configs,  # 传入配置列表
+            num_rounds=5,
+            min_fit_clients=3,
+            min_eval_clients=3,
+            min_available_clients=3,
+            visualizer=visualizer
         )
         
-        # 6. 运行训练
-        metrics_history = []
+        # 创建客户端
+        clients = []
+        for sat in satellites:
+            # 创建训练和测试数据集
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,))
+            ])
+            
+            train_dataset = datasets.MNIST(
+                './data', train=True, download=True,
+                transform=transform
+            )
+            test_dataset = datasets.MNIST(
+                './data', train=False,
+                transform=transform
+            )
+            
+            # 为每个卫星分配数据子集
+            samples_per_client = len(train_dataset) // len(satellites)
+            test_samples_per_client = len(test_dataset) // len(satellites)
+            
+            train_start_idx = sat.sat_id * samples_per_client
+            train_end_idx = train_start_idx + samples_per_client
+            train_subset = torch.utils.data.Subset(
+                train_dataset, 
+                range(train_start_idx, train_end_idx)
+            )
+            
+            test_start_idx = sat.sat_id * test_samples_per_client
+            test_end_idx = test_start_idx + test_samples_per_client
+            test_subset = torch.utils.data.Subset(
+                test_dataset,
+                range(test_start_idx, test_end_idx)
+            )
+            
+            # 创建数据加载器
+            train_loader = torch.utils.data.DataLoader(
+                train_subset,
+                batch_size=32,
+                shuffle=True
+            )
+            
+            test_loader = torch.utils.data.DataLoader(
+                test_subset,
+                batch_size=32,
+                shuffle=False
+            )
+            
+            # 创建客户端
+            client = SatelliteFlowerClient(
+                satellite_id=sat.sat_id,
+                train_data=train_loader,
+                test_data=test_loader,
+                device=torch.device("cpu"),
+                config=sat
+            )
+            clients.append(client)
         
-        for round in range(num_rounds):
+        # 开始训练
+        metrics_history = []
+        for round in range(5):  # 5轮训练
             try:
-                print(f"\n开始第 {round + 1} 轮训练...")
                 metrics = await server.train_round(clients)
-                
-                if metrics['accuracy'] > 0 or metrics['loss'] < float('inf'):
+                if metrics:
                     metrics_history.append(metrics)
                     print(f"第 {round + 1} 轮完成: "
                           f"accuracy={metrics['accuracy']:.4f}, "
@@ -188,7 +263,13 @@ async def run_simulation():
         
     except Exception as e:
         print(f"仿真运行失败: {str(e)}")
-        return []
+        raise e  # 添加这行以显示完整的错误堆栈
 
 if __name__ == "__main__":
-    asyncio.run(run_simulation()) 
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--use-grouping', action='store_true', 
+                       help='是否使用分组训练模式')
+    args = parser.parse_args()
+    
+    asyncio.run(run_simulation(use_grouping=args.use_grouping)) 
