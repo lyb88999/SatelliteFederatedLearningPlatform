@@ -22,11 +22,10 @@ async def test_federated_learning():
     
     # 创建卫星
     satellites = []
-    for orbit_id in range(3):  # 3个轨道面
-        raan = orbit_id * 120.0  # 轨道面均匀分布
-        for sat_id in range(4):  # 每个轨道面4颗卫星
-            # 计算初始相位角（在轨道平面内的位置）
-            phase_angle = sat_id * 90.0 + raan  # 考虑轨道面的旋转
+    for orbit_id in range(2):  # 2个轨道面，每个轨道面2颗卫星
+        raan = orbit_id * 180.0  # 轨道面均匀分布
+        for sat_id in range(2):
+            phase_angle = sat_id * 180.0  # 卫星在轨道内均匀分布
             
             satellites.append(
                 SatelliteConfig(
@@ -34,7 +33,7 @@ async def test_federated_learning():
                     sat_id=len(satellites),
                     semi_major_axis=earth_radius + 550.0,  # 550km轨道高度
                     eccentricity=0.001,      # 近圆轨道
-                    inclination=98.0,        # 太阳同步轨道
+                    inclination=97.6,        # 太阳同步轨道
                     raan=raan,              # 轨道面的方向
                     arg_perigee=phase_angle, # 卫星在轨道内的位置
                     epoch=datetime.now()
@@ -51,14 +50,13 @@ async def test_federated_learning():
     server = SatelliteServer(scheduler, monitor)
     server.set_model(model)
     
-    # 开始训练
     print("\n开始联邦学习测试")
     print(f"卫星数量: {len(satellites)}")
     print(f"模型参数: {[f'{k}: {v.shape}' for k, v in model.items()]}")
     
     # 模拟本地训练
     local_models = []
-    for i in range(3):  # 模拟3个卫星的本地训练结果
+    for i in range(2):  # 只使用2颗卫星进行测试
         local_model = {
             k: v + np.random.normal(0, 0.1, v.shape).astype(np.float32)
             for k, v in model.items()
@@ -104,7 +102,10 @@ async def test_federated_learning():
     print("\n卫星监控测试通过")
     
     # 测试训练流程
-    await server.start_training(model, satellites[:2])  # 只使用前两颗卫星测试
+    await server.start_training(model, satellites[:2])  # 使用卫星配置而不是客户端
     assert server.current_round > 0
     
-    print(f"\n完成 {server.current_round} 轮训练") 
+    print(f"\n完成 {server.current_round} 轮训练")
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"]) 

@@ -46,24 +46,18 @@ class OrbitCalculator:
         self.max_communication_distance = 5000.0  # 最大通信距离(km)
         
     def check_satellite_visibility(self, 
-                                 satellite: SatelliteConfig,
-                                 ground_station: GroundStation,
+                                 satellite: 'SatelliteConfig',
+                                 ground_station: Union['GroundStation', 'GroundStationConfig'],
                                  current_time: datetime) -> bool:
-        """检查卫星是否可见于地面站
+        """检查卫星是否可见于地面站"""
+        config = ground_station.config if hasattr(ground_station, 'config') else ground_station
         
-        Args:
-            satellite: 卫星配置
-            ground_station: 地面站
-            current_time: 当前时间
-        
-        Returns:
-            bool: 是否可见
-        """
         if self.debug_mode:
-            # 在调试模式下，每个地面站可以看到2-3个轨道
+            # 在调试模式下只使用轨道ID映射
             orbit_id = satellite.orbit_id
-            station_id = ground_station.config.station_id
+            station_id = config.station_id
             
+            # 检查轨道ID映射
             visibility_map = {
                 "Beijing": [0, 1],
                 "NewYork": [1, 2],
@@ -73,42 +67,41 @@ class OrbitCalculator:
                 "SaoPaulo": [5, 0]
             }
             
+            # 简单的可见性判断：如果卫星在允许的轨道ID列表中就认为可见
             return orbit_id in visibility_map.get(station_id, [])
-            
-        # 计算卫星位置
-        sat_pos = self.calculate_satellite_position(
-            satellite, current_time
-        )
         
-        # 计算地面站位置
-        station_pos = self.calculate_ground_station_position(
-            ground_station.config
-        )
+        # 非调试模式下使用完整的可见性检查
+        sat_pos = self.calculate_satellite_position(satellite, current_time)
+        station_pos = self.calculate_ground_station_position(config)
         
-        # 计算距离
         distance = np.linalg.norm(sat_pos - station_pos)
+        elevation = self._calculate_elevation(sat_pos, station_pos)
         
-        # 计算仰角
-        elevation = self.calculate_elevation(
-            sat_pos, station_pos
-        )
-        
-        # 检查可见性条件
-        return (distance <= ground_station.config.max_range and 
-                elevation >= ground_station.config.min_elevation)
+        return (distance <= config.max_range and 
+                elevation >= config.min_elevation and 
+                not self._check_earth_obstruction(sat_pos, station_pos))
         
     def calculate_satellite_position(self, sat_config: SatelliteConfig, time: datetime) -> Tuple[float, float, float]:
         """计算卫星在给定时间的位置"""
         if self.debug_mode:
-            # 在调试模式下生成一个更合理的分布
-            phase = np.radians(sat_config.arg_perigee)
+            # 在调试模式下生成一个随时间变化的位置
+            # 计算从历元开始经过的时间（秒）
+            dt = (time - sat_config.epoch).total_seconds()
+            
+            # 计算轨道周期（秒）
+            orbital_period = 2 * np.pi * np.sqrt(sat_config.semi_major_axis**3 / self.earth_mu)
+            
+            # 计算当前相位角（考虑初始相位和时间演化）
+            phase = np.radians(sat_config.arg_perigee) + (2 * np.pi * dt / orbital_period)
             inc = np.radians(sat_config.inclination)
             raan = np.radians(sat_config.raan)
             
+            # 计算轨道平面内的位置
             r = sat_config.semi_major_axis
             x_orbit = r * np.cos(phase)
             y_orbit = r * np.sin(phase)
             
+            # 转换到地心惯性坐标系
             x = x_orbit * np.cos(raan) - y_orbit * np.sin(raan) * np.cos(inc)
             y = x_orbit * np.sin(raan) + y_orbit * np.cos(raan) * np.cos(inc)
             z = y_orbit * np.sin(inc)
@@ -247,3 +240,41 @@ class OrbitCalculator:
         z = self.earth_radius * np.sin(lat)
         
         return np.array([x, y, z]) 
+
+    def _calculate_elevation(self, sat_pos: np.ndarray, station_pos: np.ndarray) -> float:
+        """计算仰角（度）"""
+        # 计算地面站到卫星的向量
+        r_vector = sat_pos - station_pos
+        
+        # 计算地面站的地心方向单位向量
+        station_unit = station_pos / np.linalg.norm(station_pos)
+        
+        # 计算夹角
+        cos_angle = np.dot(r_vector, station_unit) / np.linalg.norm(r_vector)
+        angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))  # 添加clip避免数值误差
+        
+        # 转换为仰角
+        elevation = 90 - np.degrees(angle)
+        return elevation 
+
+    def _check_earth_obstruction(self, pos1: np.ndarray, pos2: np.ndarray) -> bool:
+        """检查地球是否遮挡了两点之间的视线
+        
+        Args:
+            pos1: 第一个点的位置向量 [x, y, z]
+            pos2: 第二个点的位置向量 [x, y, z]
+            
+        Returns:
+            bool: True 如果地球遮挡了视线，False 否则
+        """
+        # 计算两点之间的向量
+        r = pos2 - pos1
+        dist = np.linalg.norm(r)
+        
+        # 计算最近点到地心的距离
+        # 使用向量代数计算点到直线的最短距离
+        p = np.dot(pos1, r) / dist
+        d = np.sqrt(np.dot(pos1, pos1) - p*p)
+        
+        # 如果最短距离小于地球半径，说明地球遮挡了视线
+        return d < self.earth_radius 

@@ -4,7 +4,7 @@ from typing import List
 from flower.config import SatelliteConfig, GroundStationConfig
 from flower.orbit_utils import OrbitCalculator
 
-def create_test_satellites(num_satellites: int = 3) -> List[SatelliteConfig]:
+def create_test_satellites(num_satellites: int = 4) -> List[SatelliteConfig]:
     """创建测试用的卫星配置"""
     orbit_calculator = OrbitCalculator(debug_mode=True)
     earth_radius = orbit_calculator.earth_radius
@@ -13,13 +13,13 @@ def create_test_satellites(num_satellites: int = 3) -> List[SatelliteConfig]:
     for i in range(num_satellites):
         satellites.append(
             SatelliteConfig(
-                orbit_id=i // 4,
+                orbit_id=i // 2,  # 每2颗卫星一个轨道面
                 sat_id=i,
                 semi_major_axis=earth_radius + 550.0,  # 550km轨道高度
                 eccentricity=0.001,
-                inclination=98.0,
-                raan=(i // 4) * 120.0,
-                arg_perigee=(i % 4) * 90.0,
+                inclination=97.6,
+                raan=(i // 2) * 180.0,  # 轨道面均匀分布
+                arg_perigee=(i % 2) * 180.0,  # 卫星在轨道内均匀分布
                 epoch=datetime.now()
             )
         )
@@ -33,9 +33,9 @@ def test_adaptive_scheduling():
     # 创建卫星配置
     satellites = []
     
-    # 创建3个轨道，每个轨道4颗卫星
-    for orbit_id in range(3):
-        for sat_id in range(4):
+    # 创建2个轨道，每个轨道2颗卫星
+    for orbit_id in range(2):
+        for sat_id in range(2):
             satellites.append(
                 SatelliteConfig(
                     orbit_id=orbit_id,
@@ -43,14 +43,14 @@ def test_adaptive_scheduling():
                     semi_major_axis=earth_radius + 550.0 + orbit_id * 50,  # 轨道高度递增
                     eccentricity=0.001,
                     inclination=97.6,
-                    raan=orbit_id * 120.0,
-                    arg_perigee=sat_id * 90.0,
+                    raan=orbit_id * 180.0,  # 轨道面均匀分布
+                    arg_perigee=sat_id * 180.0,  # 卫星在轨道内均匀分布
                     epoch=datetime.now()
                 )
             )
     
     # 验证卫星数量
-    assert len(satellites) == 12
+    assert len(satellites) == 4
     
     # 验证轨道分布
     orbit_groups = {}
@@ -59,9 +59,19 @@ def test_adaptive_scheduling():
             orbit_groups[sat.orbit_id] = []
         orbit_groups[sat.orbit_id].append(sat)
     
-    assert len(orbit_groups) == 3  # 3个轨道面
+    assert len(orbit_groups) == 2  # 2个轨道面
     for sats in orbit_groups.values():
-        assert len(sats) == 4  # 每个轨道4颗卫星
+        assert len(sats) == 2  # 每个轨道2颗卫星
+        
+    # 打印卫星分布情况
+    print("\n卫星分布情况:")
+    for orbit_id, sats in orbit_groups.items():
+        print(f"\n轨道 {orbit_id}:")
+        for sat in sats:
+            print(f"  卫星 {sat.sat_id}: "
+                  f"高度={sat.semi_major_axis - earth_radius:.1f}km, "
+                  f"RAAN={sat.raan:.1f}°, "
+                  f"相位角={sat.arg_perigee:.1f}°")
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"]) 
+    pytest.main([__file__, "-v", "-s"]) 

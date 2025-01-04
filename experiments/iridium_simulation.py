@@ -60,11 +60,11 @@ async def create_ground_stations(orbit_calculator):
             station_id=name,
             latitude=lat,
             longitude=lon,
-            max_range=2000.0,  # 降低最大通信距离
-            min_elevation=10.0,  # 提高最小仰角要求
-            max_satellites=5     # 限制同时通信的卫星数
+            max_range=2000.0,
+            min_elevation=10.0,
+            max_satellites=5
         )
-        ground_stations.append(GroundStation(config, orbit_calculator))
+        ground_stations.append(config)  # 直接返回配置对象，而不是 GroundStation 实例
     
     print(f"创建了 {len(ground_stations)} 个地面站")
     return ground_stations
@@ -134,7 +134,14 @@ async def run_simulation(use_grouping: bool = False):
         
         # 创建地面站配置
         station_configs = [
-            GroundStationConfig("Beijing", 39.9042, 116.4074, 2000, 10.0),
+            GroundStationConfig(
+                station_id="Beijing",
+                latitude=39.9042,
+                longitude=116.4074,
+                max_range=2000.0,
+                min_elevation=10.0,
+                max_satellites=4
+            ),
             GroundStationConfig("NewYork", 40.7128, -74.0060, 2000, 10.0),
             GroundStationConfig("London", 51.5074, -0.1278, 2000, 10.0),
             GroundStationConfig("Sydney", -33.8688, 151.2093, 2000, 10.0),

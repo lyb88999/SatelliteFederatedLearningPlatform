@@ -189,7 +189,7 @@ async def run_single_experiment(strategy, name):
             strategy=strategy,
             orbit_calculator=orbit_calculator,
             ground_stations=station_configs,
-            num_rounds=5,
+            num_rounds=10,
             min_fit_clients=3,
             min_eval_clients=3,
             min_available_clients=3,
@@ -200,7 +200,7 @@ async def run_single_experiment(strategy, name):
             strategy=strategy,
             orbit_calculator=orbit_calculator,
             ground_stations=station_configs,
-            num_rounds=5,
+            num_rounds=10,
             min_fit_clients=len(clients) // 2,  # 需要更多客户端参与
             min_eval_clients=len(clients) // 2,
             min_available_clients=len(clients) // 2,
@@ -211,7 +211,7 @@ async def run_single_experiment(strategy, name):
     metrics_history = []
     start_time = time.time()
     
-    for round in range(5):
+    for round in range(10):
         # 模拟通信延迟
         if not isinstance(strategy, GroupedSatelliteFedAvg):
             # 非分组方案需要更多通信时间

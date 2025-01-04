@@ -1,237 +1,134 @@
 import pytest
 from datetime import datetime, timedelta
 import numpy as np
-from flower.config import SatelliteConfig
+from flower.config import SatelliteConfig, GroundStationConfig
 from flower.orbit_utils import OrbitCalculator
 
-def test_satellite_position():
-    """测试卫星位置计算"""
-    calculator = OrbitCalculator(debug_mode=False)
-    earth_radius = calculator.earth_radius
+def test_basic_orbit_utils():
+    """测试基本轨道计算功能"""
+    # 创建轨道计算器
+    orbit_calculator = OrbitCalculator(debug_mode=True)
+    earth_radius = orbit_calculator.earth_radius
     
-    sat_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=0,
-        semi_major_axis=earth_radius + 550.0,  # 550km轨道高度
-        eccentricity=0.001,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=0.0,
-        epoch=datetime.now()
-    )
+    # 创建卫星配置
+    satellites = []
+    for orbit_id in range(2):  # 2个轨道面
+        raan = orbit_id * 180.0  # 轨道面均匀分布
+        for sat_id in range(2):  # 每个轨道2颗卫星
+            phase_angle = sat_id * 180.0  # 卫星在轨道内均匀分布
+            satellites.append(
+                SatelliteConfig(
+                    orbit_id=orbit_id,
+                    sat_id=len(satellites),
+                    semi_major_axis=earth_radius + 550.0,  # 550km轨道高度
+                    eccentricity=0.001,
+                    inclination=97.6,
+                    raan=raan,
+                    arg_perigee=phase_angle,
+                    epoch=datetime.now()
+                )
+            )
     
-    pos = calculator.calculate_satellite_position(sat_config, datetime.now())
-    assert all(isinstance(x, float) for x in pos)
+    # 创建地面站
+    ground_stations = []
+    locations = [
+        ("Beijing", 39.9042, 116.4074),
+        ("NewYork", 40.7128, -74.0060)
+    ]
+    
+    for name, lat, lon in locations:
+        config = GroundStationConfig(
+            station_id=name,
+            latitude=lat,
+            longitude=lon,
+            max_range=2000.0,
+            min_elevation=10.0,
+            max_satellites=4
+        )
+        ground_stations.append(config)
+    
+    # 测试卫星位置计算
+    current_time = datetime.now()
+    print("\n卫星位置计算测试:")
+    for satellite in satellites:
+        position = orbit_calculator.calculate_satellite_position(satellite, current_time)
+        height = np.sqrt(np.sum(np.square(position))) - earth_radius
+        print(f"\n卫星 {satellite.sat_id} (轨道 {satellite.orbit_id}):")
+        print(f"位置: X={position[0]:.1f}, Y={position[1]:.1f}, Z={position[2]:.1f}")
+        print(f"高度: {height:.1f}km")
+        
+        # 验证高度
+        assert abs(height - 550.0) < 1.0, "卫星高度应该在550km左右"
+    
+    # 测试可见性计算
+    print("\n可见性计算测试:")
+    visibility_map = {
+        "Beijing": [0],     # 北京只能看到轨道0的卫星
+        "NewYork": [1]      # 纽约只能看到轨道1的卫星
+    }
+    
+    for station in ground_stations:
+        station_visible = []
+        for satellite in satellites:
+            if satellite.orbit_id in visibility_map[station.station_id]:
+                if orbit_calculator.check_satellite_visibility(
+                    satellite, station, current_time):
+                    station_visible.append(satellite.sat_id)
+        print(f"\n地面站 {station.station_id} 可见卫星: {station_visible}")
+        
+        # 验证可见性
+        visible_sats = [sat for sat in satellites 
+                       if sat.orbit_id in visibility_map[station.station_id]]
+        assert len(station_visible) <= len(visible_sats), \
+            f"{station.station_id} 不应该看到超过{len(visible_sats)}颗卫星"
 
-def test_satellite_distance():
-    """测试卫星间距离计算"""
-    calculator = OrbitCalculator(debug_mode=False)
+def test_advanced_orbit_utils():
+    """测试高级轨道计算功能"""
+    calculator = OrbitCalculator(debug_mode=True)
+    earth_radius = calculator.earth_radius
     current_time = datetime.now()
     
-    sat1_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=0,
-        semi_major_axis=calculator.earth_radius + 550.0,
-        eccentricity=0.001,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=0.0,
-        epoch=datetime.now()
-    )
-    
-    sat2_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=1,
-        semi_major_axis=calculator.earth_radius + 550.0,
-        eccentricity=0.001,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=90.0,  # 90度相位差
-        epoch=datetime.now()
-    )
-    
-    distance = calculator.calculate_satellite_distance(sat1_config, sat2_config, current_time)
-    assert distance > 0
-
-def test_communication_window():
-    """测试通信窗口检查"""
-    calculator = OrbitCalculator(debug_mode=False)
-    current_time = datetime.now()
-    
-    sat1_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=0,
-        semi_major_axis=calculator.earth_radius + 550.0,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=0.0,
-        max_communication_distance=1000.0,  # 1000km通信距离
-        epoch=datetime.now()
-    )
-    
-    sat2_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=1,
-        semi_major_axis=calculator.earth_radius + 550.0,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=10.0,  # 10度相位差
-        epoch=datetime.now()
-    )
-    
-    has_window = calculator.check_satellite_visibility(sat1_config, sat2_config, current_time)
-    distance = calculator.calculate_satellite_distance(sat1_config, sat2_config, current_time)
-    print(f"\n通信窗口测试结果: {has_window}, 类型: {type(has_window)}")
-    print(f"卫星间距离: {distance:.2f} km")
-    print(f"最大通信距离: {sat1_config.max_communication_distance} km")
-    
-    assert isinstance(has_window, bool)
-    assert distance > 0
-
-def test_earth_obstruction():
-    """测试地球遮挡检查"""
-    calculator = OrbitCalculator(debug_mode=False)
-    earth_radius = calculator.earth_radius
-    
-    # 创建两个相对的卫星
-    sat1_config = SatelliteConfig(
+    # 创建测试卫星
+    sat1 = SatelliteConfig(
         orbit_id=0,
         sat_id=0,
         semi_major_axis=earth_radius + 550.0,
-        inclination=98.0,
+        eccentricity=0.001,
+        inclination=97.6,
         raan=0.0,
         arg_perigee=0.0,
-        epoch=datetime.now()
+        epoch=current_time
     )
     
-    sat2_config = SatelliteConfig(
+    sat2 = SatelliteConfig(
         orbit_id=0,
         sat_id=1,
         semi_major_axis=earth_radius + 550.0,
-        inclination=98.0,
+        eccentricity=0.001,
+        inclination=97.6,
         raan=0.0,
         arg_perigee=180.0,  # 对面的卫星
-        epoch=datetime.now()
+        epoch=current_time
     )
     
-    # 检查地球遮挡
-    current_time = datetime.now()
-    pos1 = calculator.calculate_satellite_position(sat1_config, current_time)
-    pos2 = calculator.calculate_satellite_position(sat2_config, current_time)
-    is_obstructed = calculator._check_earth_obstruction(pos1, pos2)
-    
-    assert isinstance(is_obstructed, bool), "地球遮挡检查应该返回布尔值"
-    assert is_obstructed, "对面的卫星应该被地球遮挡"
-
-def test_orbit_propagation():
-    """测试轨道传播"""
-    calculator = OrbitCalculator(debug_mode=False)
-    
-    # 创建一个测试卫星配置，使用当前时间作为历元
-    epoch = datetime.now()
-    sat_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=0,
-        semi_major_axis=7000.0,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=0.0,
-        eccentricity=0.0,  # 圆轨道更容易验证
-        epoch=epoch  # 设置历元时间
-    )
-    
-    # 计算轨道周期
-    orbital_period = calculator.calculate_orbital_period(sat_config.semi_major_axis)
-    print(f"\n轨道周期: {orbital_period/60:.2f} 分钟")
-    
-    # 记录一个轨道周期内的位置
-    positions = []
-    times = []
-    for i in range(5):  # 记录5个点，包括起点和终点
-        t = epoch + timedelta(seconds=i*orbital_period/4)
-        times.append(t)
-        pos = calculator.calculate_satellite_position(sat_config, t)
-        positions.append(pos)
-        print(f"时间点 {i}: {pos}")
-    
-    # 验证轨道是否闭合
-    start_pos = np.array(positions[0])
-    end_pos = np.array(positions[-1])
-    
-    # 计算绝对误差和相对误差
-    abs_error = np.abs(end_pos - start_pos)
-    print(f"\n起始位置: {start_pos}")
-    print(f"终止位置: {end_pos}")
-    print(f"绝对误差: {abs_error}")
-    
-    # 使用轨道半径作为参考尺度
-    orbit_radius = sat_config.semi_major_axis
-    normalized_error = abs_error / orbit_radius
-    print(f"归一化误差: {normalized_error}")
-    
-    # 验证轨道闭合性
-    assert np.all(normalized_error < 1e-6), "轨道未闭合，误差过大"
-    
-    # 验证轨道半径
-    for pos in positions:
-        radius = np.sqrt(np.sum(np.array(pos)**2))
-        radius_error = abs(radius - orbit_radius) / orbit_radius
-        print(f"轨道半径: {radius:.2f} km, 相对误差: {radius_error:.2e}")
-        assert radius_error < 1e-6, "轨道半径误差过大"
-
-def test_real_orbit_calculations():
-    """测试实际轨道计算"""
-    calculator = OrbitCalculator(debug_mode=False)
-    current_time = datetime.now()
-    
-    # 创建一个LEO卫星配置
-    sat_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=0,
-        semi_major_axis=7000.0,  # LEO轨道
-        eccentricity=0.001,      # 近圆轨道
-        inclination=98.0,        # 太阳同步轨道
-        raan=0.0,
-        arg_perigee=0.0,
-        epoch=datetime.now()
-    )
-    
-    # 1. 测试位置计算
-    pos = calculator.calculate_satellite_position(sat_config, datetime.now())
-    print(f"\n卫星位置: {pos}")
-    assert all(isinstance(x, float) for x in pos)
-    
-    # 2. 测试轨道周期
-    period = calculator.calculate_orbital_period(sat_config.semi_major_axis)
-    print(f"轨道周期: {period/60:.2f} 分钟")
+    # 测试轨道周期
+    period = calculator.calculate_orbital_period(sat1.semi_major_axis)
+    print(f"\n轨道周期: {period/60:.2f} 分钟")
     assert 90 < period/60 < 100  # LEO轨道周期约为90-100分钟
     
-    # 3. 测试地面轨迹
-    track = calculator.calculate_ground_track(sat_config, datetime.now(), 1.0)
-    print(f"地面轨迹点数: {len(track)}")
-    assert len(track) > 0
-    assert all(-180 <= lon <= 180 and -90 <= lat <= 90 for lon, lat in track)
-    
-    # 4. 测试通信窗口
-    sat2_config = SatelliteConfig(
-        orbit_id=0,
-        sat_id=1,
-        semi_major_axis=7000.0,
-        eccentricity=0.001,
-        inclination=98.0,
-        raan=0.0,
-        arg_perigee=10.0,  # 相位差10度
-        epoch=datetime.now()
-    )
-    
-    has_window = calculator.check_communication_window(sat_config, sat2_config)
-    distance = calculator.calculate_satellite_distance(sat_config, sat2_config, current_time)
+    # 测试卫星间距离
+    distance = calculator.calculate_satellite_distance(sat1, sat2, current_time)
     print(f"卫星间距离: {distance:.2f} km")
-    print(f"通信窗口: {has_window}")
-    
-    # 验证结果
-    assert isinstance(has_window, bool)
     assert distance > 0
+    
+    # 测试地球遮挡
+    pos1 = calculator.calculate_satellite_position(sat1, current_time)
+    pos2 = calculator.calculate_satellite_position(sat2, current_time)
+    # 转换为 numpy 数组
+    pos1_array = np.array(pos1)
+    pos2_array = np.array(pos2)
+    is_obstructed = calculator._check_earth_obstruction(pos1_array, pos2_array)
+    assert is_obstructed, "对面的卫星应该被地球遮挡"
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"]) 

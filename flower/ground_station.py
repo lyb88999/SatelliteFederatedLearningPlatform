@@ -70,15 +70,15 @@ class GroundStation:
             print(f"分发错误: {str(e)}")
             return False
             
-    def get_visible_satellites(self, satellites: List['SatelliteConfig']) -> List['SatelliteConfig']:
-        """获取当前可见的卫星"""
-        visible = []
+    def get_visible_satellites(self, satellites: List[SatelliteConfig]) -> List[SatelliteConfig]:
+        """获取当前可见的卫星列表"""
         current_time = datetime.now()
+        visible_sats = []
         
         for sat in satellites:
-            if self.orbit_calculator.check_satellite_visibility(self, sat, current_time):
-                visible.append(sat)
-                if len(visible) >= self.config.max_satellites:
+            if self.orbit_calculator.check_satellite_visibility(sat, self.config, current_time):
+                visible_sats.append(sat)
+                if len(visible_sats) >= self.config.max_satellites:
                     break
-                    
-        return visible[:self.config.max_satellites] 
+        
+        return visible_sats 
