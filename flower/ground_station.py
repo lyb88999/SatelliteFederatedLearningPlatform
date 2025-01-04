@@ -70,9 +70,9 @@ class GroundStation:
             print(f"分发错误: {str(e)}")
             return False
             
-    def get_visible_satellites(self, satellites: List[SatelliteConfig]) -> List[SatelliteConfig]:
+    def get_visible_satellites(self, satellites: List[SatelliteConfig], time: Optional[datetime] = None) -> List[SatelliteConfig]:
         """获取当前可见的卫星列表"""
-        current_time = datetime.now()
+        current_time = time if time is not None else datetime.now()
         visible_sats = []
         
         for sat in satellites:
