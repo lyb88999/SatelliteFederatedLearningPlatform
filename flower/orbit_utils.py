@@ -5,17 +5,37 @@ from typing import Tuple, List, Dict, Union, TYPE_CHECKING
 # 避免循环导入
 if TYPE_CHECKING:
     from .ground_station import GroundStation
-    from .config import SatelliteConfig
+    from .config import SatelliteConfig, GroundStationConfig
 else:
     SatelliteConfig = 'SatelliteConfig'
     GroundStation = 'GroundStation'
+    GroundStationConfig = 'GroundStationConfig'
 
 from astropy.time import Time
 from astropy import units as u
 from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
-from poliastro.util import time_range
 from astropy.coordinates import CartesianRepresentation
+
+# 移除 from poliastro.util import time_range
+# 替代方案：自己实现 time_range 函数
+def time_range(start_time: datetime, end_time: datetime, step: timedelta) -> List[datetime]:
+    """生成时间序列
+    
+    Args:
+        start_time: 开始时间
+        end_time: 结束时间
+        step: 时间步长
+        
+    Returns:
+        List[datetime]: 时间序列
+    """
+    times = []
+    current = start_time
+    while current <= end_time:
+        times.append(current)
+        current += step
+    return times
 
 class OrbitCalculator:
     """轨道计算器"""
