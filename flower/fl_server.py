@@ -1,449 +1,305 @@
-from typing import Dict, List, Optional, Tuple
 import flwr as fl
 from flwr.common import (
-    Metrics, 
-    FitRes, 
-    Status, 
-    Code,
     Parameters,
-    ndarrays_to_parameters,
-    parameters_to_ndarrays,
     FitIns, 
-    EvaluateIns,
     FitRes,
+    EvaluateIns,
     EvaluateRes,
+    parameters_to_ndarrays,
+    ndarrays_to_parameters,
 )
 from flwr.server.strategy import FedAvg
 from flwr.server.client_proxy import ClientProxy
-from datetime import datetime
-from .orbit_utils import OrbitCalculator
-from .config import SatelliteConfig, GroundStationConfig
-from .ground_station import GroundStation
-from .client import SatelliteFlowerClient
-import time
-import random
-import torch
-from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
-import asyncio
-import json
-from .visualization import FederatedLearningVisualizer
 
-class SatelliteFedAvg(FedAvg):
-    """分层联邦平均策略"""
+class SatelliteStrategy(FedAvg):
+    """卫星联邦学习策略"""
     
-    def __init__(self, visualizer: FederatedLearningVisualizer = None):
-        super().__init__()
-        self.visualizer = visualizer
-        self.current_round = 0
-        
-    async def train_orbit(self, orbit_id: int, orbit_clients: List[SatelliteFlowerClient]):
-        """轨道内训练基础实现"""
-        print(f"\n开始轨道 {orbit_id} 的训练...")
-        
-        try:
-            # 训练
-            train_tasks = [client.train() for client in orbit_clients]
-            train_results = await asyncio.gather(*train_tasks)
-            
-            # 更新卫星级别的指标
-            for client, (num_examples, metrics) in zip(orbit_clients, train_results):
-                if self.visualizer:
-                    print(f"更新卫星 {client.satellite_id} 的训练指标: {metrics}")
-                    self.visualizer.update_satellite_metrics(
-                        round=self.current_round,
-                        satellite_id=client.satellite_id,
-                        metrics=metrics,
-                        is_training=True
-                    )
-            
-            # 轨道内聚合
-            orbit_model = self.aggregate_orbit(
-                orbit_id,
-                [(client, result) for client, result in zip(orbit_clients, train_results)]
-            )
-            
-            if orbit_model:
-                # 更新模型
-                for client in orbit_clients:
-                    await client.set_model(orbit_model)
-                
-                # 评估
-                eval_tasks = [client.evaluate() for client in orbit_clients]
-                eval_results = await asyncio.gather(*eval_tasks)
-                
-                # 更新评估指标
-                for client, (num_examples, metrics) in zip(orbit_clients, eval_results):
-                    if self.visualizer:
-                        print(f"更新卫星 {client.satellite_id} 的评估指标: {metrics}")
-                        self.visualizer.update_satellite_metrics(
-                            round=self.current_round,
-                            satellite_id=client.satellite_id,
-                            metrics=metrics,
-                            is_training=False
-                        )
-                
-                # 更新轨道级别的指标
-                orbit_metrics = self.aggregate_metrics(eval_results)
-                if self.visualizer:
-                    self.visualizer.update_orbit_metrics(
-                        self.current_round,
-                        orbit_id,
-                        orbit_metrics
-                    )
-                
-                return orbit_id, orbit_model
-                
-        except Exception as e:
-            print(f"轨道 {orbit_id} 训练失败: {str(e)}")
-            raise e
-            
-        return None
-        
-    def aggregate_orbit(self, orbit_id: int, results: List[Tuple[SatelliteFlowerClient, Tuple[int, Dict[str, float]]]]) -> Optional[Parameters]:
-        """轨道内聚合"""
-        if not results:
-            return None
-            
-        # 基于性能的权重计算
-        weights_results = []
-        for client, (num_examples, metrics) in results:
-            # 获取当前模型参数
-            params = [val.cpu().numpy() for _, val in client.model.state_dict().items()]
-            
-            # 计算权重
-            current_accuracy = metrics.get('accuracy', 0.0)
-            current_loss = metrics.get('loss', float('inf'))
-            
-            # 如果有历史数据就使用，没有就只用当前性能
-            if self.visualizer:
-                history = self.visualizer.satellite_history.get(client.satellite_id, {})
-                prev_accuracy = history.get('accuracy', [0.0])[-1] if history.get('accuracy') else 0.0
-                weight = (1.0 / (current_loss + 1e-10)) * (1.0 + 0.7 * current_accuracy + 0.3 * prev_accuracy)
-            else:
-                weight = (1.0 / (current_loss + 1e-10)) * (1.0 + current_accuracy)
-            
-            weights_results.append((params, weight))
-            
-        if not weights_results:
-            return None
-            
-        # 归一化权重
-        total_weight = sum(w for _, w in weights_results)
-        aggregated_params = [np.zeros_like(param) for param in weights_results[0][0]]
-        
-        for parameters, weight in weights_results:
-            weight = weight / total_weight
-            for i, param in enumerate(parameters):
-                aggregated_params[i] += param * weight
-                
-        print(f"轨道 {orbit_id} 内聚合完成，参与节点数: {len(weights_results)}")
-        return ndarrays_to_parameters(aggregated_params)
-        
-    def aggregate_orbit_neighbors(self, model1: Parameters, model2: Parameters) -> Parameters:
-        """融合相邻轨道的模型"""
-        params1 = parameters_to_ndarrays(model1)
-        params2 = parameters_to_ndarrays(model2)
-        
-        # 简单平均两个模型的参数
-        aggregated_params = []
-        for p1, p2 in zip(params1, params2):
-            aggregated_params.append((p1 + p2) / 2)
-            
-        return ndarrays_to_parameters(aggregated_params)
-        
-    def aggregate_ground_station(self, station_id: str, orbit_models: List[Tuple[int, Parameters]]) -> Optional[Parameters]:
-        """地面站级聚合"""
-        if not orbit_models:
-            return None
-            
-        # 简单平均所有轨道的模型
-        params_list = [parameters_to_ndarrays(params) for _, params in orbit_models]
-        aggregated_params = []
-        
-        for param_idx in range(len(params_list[0])):
-            param_sum = sum(params[param_idx] for params in params_list)
-            aggregated_params.append(param_sum / len(params_list))
-            
-        print(f"地面站 {station_id} 聚合了 {len(orbit_models)} 个轨道的模型")
-        return ndarrays_to_parameters(aggregated_params)
-        
-    def aggregate_global(self, station_models: List[Tuple[str, Parameters]]) -> Optional[Parameters]:
-        """全局聚合"""
-        if not station_models:
-            return None
-            
-        # 简单平均所有地面站的模型
-        params_list = [parameters_to_ndarrays(params) for _, params in station_models]
-        aggregated_params = []
-        
-        for param_idx in range(len(params_list[0])):
-            param_sum = sum(params[param_idx] for params in params_list)
-            aggregated_params.append(param_sum / len(params_list))
-            
-        return ndarrays_to_parameters(aggregated_params)
-
-    def aggregate_metrics(self, results: List[Tuple[int, Dict[str, float]]]) -> Dict[str, float]:
-        """聚合评估指标
-        
-        Args:
-            results: 评估结果列表，每个元素是(样本数, 指标字典)的元组
-            
-        Returns:
-            聚合后的指标字典
-        """
-        if not results:
-            return {
-                'accuracy': 0.0,
-                'loss': float('inf')
-            }
-            
-        total_examples = sum(num_examples for num_examples, _ in results)
-        weighted_accuracy = 0.0
-        weighted_loss = 0.0
-        
-        for num_examples, metrics in results:
-            weight = num_examples / total_examples
-            weighted_accuracy += metrics.get('accuracy', 0.0) * weight
-            weighted_loss += metrics.get('loss', float('inf')) * weight
-            
-        return {
-            'accuracy': weighted_accuracy,
-            'loss': weighted_loss
-        }
-
-class SatelliteFlowerServer:
-    """卫星联邦学习服务器"""
     def __init__(
         self,
-        strategy: SatelliteFedAvg,
-        orbit_calculator: OrbitCalculator,
-        ground_stations: List[GroundStationConfig],
-        num_rounds: int = 5,
-        min_fit_clients: int = 3,
-        min_eval_clients: int = 3,
-        min_available_clients: int = 3,
-        visualizer: Optional['FederatedLearningVisualizer'] = None
+        orbit_calculator,
+        ground_stations,
+        fraction_fit: float = 0.2,
+        fraction_evaluate: float = 0.15,
+        min_fit_clients: int = 8,
+        min_evaluate_clients: int = 6,
+        min_available_clients: int = 15,
+        visualizer=None,
+        debug_mode: bool = True,
     ):
-        """初始化服务器
-        
-        Args:
-            strategy: 联邦学习策略
-            orbit_calculator: 轨道计算器
-            ground_stations: 地面站列表
-            num_rounds: 训练轮数
-            min_fit_clients: 最小训练客户端数
-            min_eval_clients: 最小评估客户端数
-            min_available_clients: 最小可用客户端数
-            visualizer: 可视化器（可选）
-        """
-        self.strategy = strategy
+        super().__init__(
+            fraction_fit=fraction_fit,
+            fraction_evaluate=fraction_evaluate,
+            min_fit_clients=min_fit_clients,
+            min_evaluate_clients=min_evaluate_clients,
+            min_available_clients=min_available_clients,
+            evaluate_metrics_aggregation_fn=self.aggregate_evaluate_metrics
+        )
         self.orbit_calculator = orbit_calculator
         self.ground_stations = ground_stations
-        self.num_rounds = num_rounds
-        self.min_fit_clients = min_fit_clients
-        self.min_eval_clients = min_eval_clients
-        self.min_available_clients = min_available_clients
         self.visualizer = visualizer
-        
+        self.debug_mode = debug_mode
         self.current_round = 0
-        self.model = None
+        self.best_accuracy = 0.0
+        self.patience = 10
+        self.patience_counter = 0
+        self.min_delta = 0.01
+        self.orbit_metrics = {}  # 轨道级别指标
+        self.station_metrics = {}  # 地面站级别指标
+        self.satellite_metrics = {}  # 卫星级别指标
         
-        # 添加全局指标追踪
-        self.global_metrics = {
-            'accuracy': [],
-            'loss': []
-        }
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager
+    ) -> List[Tuple[ClientProxy, FitIns]]:
+        """配置训练参数"""
+        self.current_round = server_round
         
-        # 初始化卫星列表
-        self.satellites = []
+        # 获取可用客户端
+        sample_size = self.min_fit_clients
+        clients = client_manager.sample(
+            num_clients=sample_size, 
+            min_num_clients=self.min_fit_clients
+        )
         
-    async def train_round(self, clients: List[SatelliteFlowerClient]) -> Dict:
-        """执行一轮分层训练"""
-        try:
-            # 更新卫星列表
-            self.satellites = [client.config for client in clients]
+        # 为每个客户端配置训练参数
+        fit_configurations = []
+        for client in clients:
+            # 从客户端ID中提取轨道信息
+            node_id_str = str(client.node_id)
+            hash_value = hash(node_id_str)
+            idx = abs(hash_value) % 66  # 66 是卫星总数
+            orbit_id = idx // 11    # 每个轨道11颗卫星
             
-            self.current_round += 1
-            print(f"\n{'='*20} 轮次 {self.current_round}/{self.num_rounds} {'='*20}")
+            config = {
+                "orbit_id": orbit_id,
+                "current_round": server_round,
+                "local_epochs": 1,
+            }
+            fit_configurations.append((client, FitIns(parameters, config)))
             
-            # 更新策略的轮次
-            self.strategy.current_round = self.current_round
+        return fit_configurations
+
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
+    ) -> Tuple[Optional[Parameters], Dict[str, float]]:
+        """聚合训练结果"""
+        if not results:
+            return None, {}
             
-            # 1. 轨道内训练
-            orbit_tasks = []
-            orbit_models = {}
-            orbit_metrics = {}
+        # 按轨道分组聚合
+        orbit_models = {}
+        orbit_metrics = {}  # 记录每个轨道的指标
+        
+        for client, fit_res in results:
+            # 从客户端ID中提取轨道信息
+            node_id_str = str(client.node_id)
+            hash_value = hash(node_id_str)
+            idx = abs(hash_value) % 66
+            orbit_id = idx // 11
+            satellite_id = idx
             
-            # 按轨道分组
-            orbit_groups = {}
-            for client in clients:
-                orbit_id = client.satellite_id // 11
-                if orbit_id not in orbit_groups:
-                    orbit_groups[orbit_id] = []
-                orbit_groups[orbit_id].append(client)
+            # 记录卫星级别指标
+            self.satellite_metrics[f"sat_{satellite_id}"] = {
+                "round": server_round,
+                "accuracy": float(fit_res.metrics["accuracy"]),  # 确保是标量
+                "loss": float(fit_res.metrics["loss"])
+            }
             
-            # 并行执行所有轨道的训练
-            for orbit_id, orbit_clients in orbit_groups.items():
-                task = self.strategy.train_orbit(orbit_id, orbit_clients)
-                orbit_tasks.append(task)
+            # 更新轨道级别指标
+            if orbit_id not in orbit_metrics:
+                orbit_metrics[orbit_id] = {
+                    "accuracy": [],
+                    "loss": [],
+                    "num_satellites": 0
+                }
+            orbit_metrics[orbit_id]["accuracy"].append(float(fit_res.metrics["accuracy"]))  # 确保是标量
+            orbit_metrics[orbit_id]["loss"].append(float(fit_res.metrics["loss"]))
+            orbit_metrics[orbit_id]["num_satellites"] += 1
             
-            orbit_results = await asyncio.gather(*orbit_tasks)
+            # 存储模型参数和样本数
+            if orbit_id not in orbit_models:
+                orbit_models[orbit_id] = []
+            orbit_models[orbit_id].append((fit_res.parameters, fit_res.num_examples))
+        
+        # 计算轨道平均指标
+        for orbit_id, metrics in orbit_metrics.items():
+            self.orbit_metrics[f"orbit_{orbit_id}"] = {
+                "round": server_round,
+                "accuracy": float(np.mean(metrics["accuracy"])),  # 确保是标量
+                "loss": float(np.mean(metrics["loss"])),
+                "active_satellites": metrics["num_satellites"]
+            }
             
-            # 收集轨道模型和指标
-            for result in orbit_results:
-                if result:
-                    orbit_id, model = result
-                    orbit_models[orbit_id] = model
+        # 地面站级别聚合和指标统计
+        for station in self.ground_stations:
+            visible_metrics = {
+                "accuracy": [],
+                "loss": [],
+                "num_orbits": 0
+            }
             
-            # 2. 地面站级聚合
-            station_models = []
-            current_time = datetime.now()
+            for orbit_id, metrics in orbit_metrics.items():
+                if self.orbit_calculator.check_visibility(station, orbit_id):
+                    visible_metrics["accuracy"].extend(metrics["accuracy"])  # 使用extend而不是append
+                    visible_metrics["loss"].extend(metrics["loss"])
+                    visible_metrics["num_orbits"] += 1
+                    
+            if visible_metrics["num_orbits"] > 0:
+                self.station_metrics[f"station_{station.station_id}"] = {
+                    "round": server_round,
+                    "accuracy": float(np.mean(visible_metrics["accuracy"])),  # 确保是标量
+                    "loss": float(np.mean(visible_metrics["loss"])),
+                    "visible_orbits": visible_metrics["num_orbits"]
+                }
+        
+        # 打印分层统计信息
+        if self.debug_mode:
+            print(f"\n=== Round {server_round} Statistics ===")
             
-            print("\n开始地面站级聚合...")
+            # 打印每个卫星的指标
+            print("\nSatellite-level metrics:")
+            sats_this_round = {k: v for k, v in self.satellite_metrics.items() 
+                               if v["round"] == server_round}
+            for sat_id, metrics in sorted(sats_this_round.items()):
+                print(f"{sat_id}: Acc={metrics['accuracy']:.4f}, "
+                      f"Loss={metrics['loss']:.4f}, "
+                      f"Orbit={int(sat_id.split('_')[1]) // 11}")  # 计算轨道ID
+                      
+            print("\nOrbit-level metrics:")
+            for orbit_id, metrics in self.orbit_metrics.items():
+                if metrics["round"] == server_round:
+                    print(f"{orbit_id}: Acc={metrics['accuracy']:.4f}, "
+                          f"Loss={metrics['loss']:.4f}, "
+                          f"Active Sats={metrics['active_satellites']}")
+                    
+            print("\nGround station metrics:")
+            for station_id, metrics in self.station_metrics.items():
+                if metrics["round"] == server_round:
+                    print(f"{station_id}: Acc={metrics['accuracy']:.4f}, "
+                          f"Loss={metrics['loss']:.4f}, "
+                          f"Visible Orbits={metrics['visible_orbits']}")
+                    
+            print("\nSatellite metrics summary:")
+            sats_this_round = {k: v for k, v in self.satellite_metrics.items() 
+                              if v["round"] == server_round}
+            print(f"Active satellites: {len(sats_this_round)}")
+            print(f"Avg Accuracy: {np.mean([m['accuracy'] for m in sats_this_round.values()]):.4f}")
+            print(f"Avg Loss: {np.mean([m['loss'] for m in sats_this_round.values()]):.4f}")
+            print("="*50)
+        
+        # 地面站级聚合
+        visible_models = self._aggregate_ground_stations(orbit_models)
+        
+        # 全局聚合
+        if not visible_models:
+            return None, {}
             
-            # 创建 GroundStation 对象
-            ground_station_instances = [
-                GroundStation(config, self.orbit_calculator) 
-                for config in self.ground_stations
-            ]
+        # 简单平均所有地面站的模型
+        weights = [1.0/len(visible_models)] * len(visible_models)
+        aggregated_params = self._aggregate_parameters(visible_models, weights)
+        
+        return aggregated_params, {}  # 移除了 avg_metrics，因为它未定义
+
+    def _aggregate_ground_stations(self, orbit_models: Dict[int, List[Tuple[Parameters, int]]]) -> List[Parameters]:
+        """地面站级聚合
+        Args:
+            orbit_models: Dict[轨道ID, List[（模型参数，样本数）]]
+        """
+        visible_models = []
+        for station in self.ground_stations:
+            visible_orbit_params = []
+            visible_orbit_weights = []
             
-            # 地面站聚合也可以并行
-            async def aggregate_station(station: GroundStation):
-                visible_orbits = []
-                print(f"\n检查地面站 {station.config.station_id} 的可见性...")
-                
-                for orbit_id, model in orbit_models.items():
-                    coordinator = self._get_orbit_coordinator(orbit_id)
-                    if coordinator:
-                        is_visible = self.orbit_calculator.check_satellite_visibility(
-                            coordinator, station, current_time)
-                        print(f"轨道 {orbit_id} {'可见' if is_visible else '不可见'}")
+            for orbit_id, models in orbit_models.items():
+                # 使用轨道计算器检查可见性
+                if self.orbit_calculator.check_visibility(station, orbit_id):
+                    if self.visualizer:
+                        print(f"地面站 {station.station_id} 可见轨道 {orbit_id}")
                         
-                        if is_visible:
-                            visible_orbits.append((orbit_id, model))
-                            print(f"地面站 {station.config.station_id} 可见轨道 {orbit_id}")
-                
-                if visible_orbits:
-                    station_model = self.strategy.aggregate_ground_station(
-                        station.config.station_id, visible_orbits)
-                    if station_model:
-                        print(f"地面站 {station.config.station_id} 完成轨道间聚合，"
-                              f"聚合了 {len(visible_orbits)} 个轨道的模型")
-                        return station.config.station_id, station_model
-                return None
+                    # 先聚合这个轨道内的所有模型
+                    parameters = [p for p, _ in models]
+                    weights = [float(n) for _, n in models]
+                    orbit_aggregated = self._aggregate_parameters(parameters, weights)
+                    
+                    # 添加到可见轨道列表
+                    visible_orbit_params.append(orbit_aggregated)
+                    visible_orbit_weights.append(sum(weights))  # 使用轨道内总样本数作为权重
             
-            # 并行执行所有地面站的聚合
-            station_tasks = [
-                aggregate_station(station) 
-                for station in ground_station_instances
-            ]
-            station_results = await asyncio.gather(*station_tasks)
-            
-            # 收集地面站模型
-            station_models = [result for result in station_results if result is not None]
-            
-            print(f"\n地面站级聚合完成，参与地面站数: {len(station_models)}")
-            
-            # 3. 全局聚合
-            if station_models:
-                print(f"\n开始全局聚合，参与地面站数: {len(station_models)}")
-                self.model = self.strategy.aggregate_global(station_models)
-                for client in clients:
-                    await client.set_model(self.model)  # 更新所有客户端的模型
-                print("全局聚合完成")
-            
-            # 4. 评估
-            print("\n开始全局评估...")
-            eval_tasks = [client.evaluate() for client in clients]
-            eval_results = await asyncio.gather(*eval_tasks)
-            
-            # 5. 计算全局指标
-            aggregated_metrics = self.strategy.aggregate_metrics(eval_results)
-            
-            # 更新全局指标
-            if self.visualizer:
-                print(f"更新全局指标: {aggregated_metrics}")
-                # 更新可视化器的全局指标
-                self.visualizer.update_global_metrics(
-                    round=self.current_round,
-                    metrics=aggregated_metrics
+            if visible_orbit_params:
+                # 聚合所有可见轨道的模型
+                station_model = self._aggregate_parameters(
+                    visible_orbit_params,
+                    visible_orbit_weights
                 )
-                # 保存到服务器的全局指标历史
-                self.global_metrics['accuracy'].append(aggregated_metrics['accuracy'])
-                self.global_metrics['loss'].append(aggregated_metrics['loss'])
+                visible_models.append(station_model)
             
-            print(f"\n本轮训练结果:")
-            print(f"- 准确率: {aggregated_metrics['accuracy']:.4f}")
-            print(f"- 损失: {aggregated_metrics['loss']:.4f}")
-            print(f"- 参与轨道数: {len(orbit_models)}")
-            print(f"- 参与地面站数: {len(station_models)}")
-            print(f"第 {self.current_round} 轮完成: accuracy={aggregated_metrics['accuracy']:.4f}, loss={aggregated_metrics['loss']:.4f}")
-            
-            return aggregated_metrics
-            
-        except Exception as e:
-            print(f"轮次 {self.current_round} 训练失败: {str(e)}")
-            raise e
+        return visible_models
+
+    def _aggregate_parameters(self, parameters_list: List[Parameters], 
+                             weights: List[float]) -> Parameters:
+        """聚合参数
+        Args:
+            parameters_list: 要聚合的模型参数列表
+            weights: 对应的权重列表
+        """
+        # 转换为numpy数组
+        parameters = [parameters_to_ndarrays(p) for p in parameters_list]
         
-    def _get_orbit_coordinator(self, orbit_id: int) -> Optional[SatelliteConfig]:
-        """获取轨道协调者"""
-        orbit_satellites = [sat for sat in self.satellites if sat.orbit_id == orbit_id]
-        if not orbit_satellites:
-            return None
-        # 简单策略：选择第一颗卫星作为协调者
-        return orbit_satellites[0]
+        # 确保权重是浮点数并归一化
+        weights = [float(w) for w in weights]
+        total_weight = sum(weights)
+        weights = [w/total_weight for w in weights]
         
-    def aggregate_metrics(self, metrics_list: List[Tuple[int, Dict[str, float]]]) -> Dict[str, float]:
+        # 加权平均每一层
+        aggregated_params = []
+        for layer_idx in range(len(parameters[0])):
+            layer_updates = [params[layer_idx] for params in parameters]
+            weighted_layer = np.zeros_like(layer_updates[0])
+            for w, update in zip(weights, layer_updates):
+                weighted_layer += update * w
+            aggregated_params.append(weighted_layer)
+        
+        return ndarrays_to_parameters(aggregated_params)
+
+    def aggregate_evaluate_metrics(self, metrics):
         """聚合评估指标"""
-        if not metrics_list:
-            return {
-                'accuracy': 0.0,
-                'loss': float('inf')
-            }
-        
-        total_examples = sum(num_examples for num_examples, _ in metrics_list)
-        if total_examples == 0:
-            return {
-                'accuracy': 0.0,
-                'loss': float('inf')
-            }
-        
-        weighted_accuracy = 0.0
-        weighted_loss = 0.0
-        
-        for num_examples, metrics in metrics_list:
-            if num_examples > 0:  # 只聚合有效的指标
-                weight = num_examples / total_examples
-                weighted_accuracy += metrics.get('accuracy', 0.0) * weight
-                weighted_loss += metrics.get('loss', float('inf')) * weight
-        
-        return {
-            'accuracy': weighted_accuracy,
-            'loss': weighted_loss
-        }
-        
-    async def start(self):
-        """启动联邦学习服务器"""
-        try:
-            # 创建卫星客户端
-            clients = self.create_clients()
-            print(f"创建了 {len(clients)} 颗卫星")
-            print(f"创建了 {len(self.ground_stations)} 个地面站\n")
+        if not metrics:
+            return {}
             
-            # 执行多轮训练
-            for _ in range(self.num_rounds):
-                await self.train_round(clients)
-                
-            # 在训练结束后生成可视化结果
-            if self.visualizer:
-                self.visualizer.plot_satellite_metrics()
-                self.visualizer.plot_orbit_metrics()
-                self.visualizer.plot_global_metrics()
-                
-            print("\n保存实验结果...")
-            print("实验结果已保存到 results 目录")
+        # 计算加权平均
+        keys = metrics[0][1].keys()
+        aggregated = {}
+        total_examples = sum(num_examples for num_examples, _ in metrics)
+        
+        for key in keys:
+            weighted_metric = 0.0
+            for num_examples, m in metrics:
+                weighted_metric += m[key] * num_examples / total_examples
+            aggregated[key] = weighted_metric
             
-        except Exception as e:
-            print(f"训练失败: {str(e)}")
-            raise e
+        return aggregated
+
+    def aggregate_evaluate(self, server_round, results, failures):
+        """聚合评估结果并检查早停"""
+        aggregated = super().aggregate_evaluate(server_round, results, failures)
+        
+        if aggregated is not None:
+            loss_aggregated, metrics_aggregated = aggregated
+            current_accuracy = metrics_aggregated.get("accuracy", 0.0)
+            
+            # 检查是否有显著改进
+            if current_accuracy > (self.best_accuracy + self.min_delta):
+                self.best_accuracy = current_accuracy
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+                
+            if self.patience_counter >= self.patience:
+                print(f"Early stopping at round {server_round} (best accuracy: {self.best_accuracy:.4f})")
+                return aggregated
+                
+        return aggregated

@@ -264,15 +264,15 @@ def create_model() -> nn.Module:
     return Net()  # 使用之前定义的 Net 类
 
 # 然后定义 SatelliteFlowerClient 类
-class SatelliteFlowerClient:
+class SatelliteFlowerClient(fl.client.NumPyClient):
     """卫星联邦学习客户端"""
     def __init__(
         self,
         satellite_id: int,
-        train_data: torch.utils.data.DataLoader,
-        test_data: torch.utils.data.DataLoader,
+        train_data: torch.utils.data.Dataset,
+        test_data: torch.utils.data.Dataset,
         device: torch.device,
-        config: SatelliteConfig
+        config: SatelliteConfig,
     ):
         """初始化卫星客户端"""
         self.satellite_id = satellite_id
@@ -297,6 +297,19 @@ class SatelliteFlowerClient:
             self.optimizer,
             step_size=1,
             gamma=0.98
+        )
+        
+        # 创建数据加载器
+        self.train_loader = torch.utils.data.DataLoader(
+            train_data,
+            batch_size=32,
+            shuffle=True
+        )
+        
+        self.test_loader = torch.utils.data.DataLoader(
+            test_data,
+            batch_size=32,
+            shuffle=False
         )
         
         # 初始化资源监控器
@@ -399,6 +412,115 @@ class SatelliteFlowerClient:
         params_dict = zip(self.model.state_dict().keys(), parameters_to_ndarrays(parameters))
         state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
         self.model.load_state_dict(state_dict, strict=True)
+
+    def get_parameters(self, config):
+        """获取模型参数"""
+        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+    
+    def set_parameters(self, parameters):
+        """设置模型参数"""
+        params_dict = zip(self.model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        self.model.load_state_dict(state_dict, strict=True)
+    
+    def fit(self, parameters, config):
+        """训练模型"""
+        self.set_parameters(parameters)
+        
+        # 配置训练参数
+        epochs = config.get("local_epochs", 1)
+        current_round = config.get("current_round", 1)
+        
+        # 调整学习率策略
+        base_lr = 0.1
+        lr = base_lr * (0.95 ** (current_round - 1))  # 更温和的衰减
+        
+        optimizer = torch.optim.SGD(
+            self.model.parameters(),
+            lr=lr,
+            momentum=0.9,
+            weight_decay=1e-5  # 降低权重衰减
+        )
+        
+        # 训练
+        self.model.train()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        
+        for epoch in range(epochs):
+            running_loss = 0.0
+            running_correct = 0
+            running_samples = 0
+            
+            print(f"Training epoch {epoch+1}/{epochs}")
+            
+            for batch_idx, (data, target) in enumerate(self.train_loader):
+                data, target = data.to(self.device), target.to(self.device)
+                optimizer.zero_grad()
+                output = self.model(data)
+                loss = F.cross_entropy(output, target)
+                loss.backward()
+                optimizer.step()
+                
+                # 计算批次准确率
+                pred = output.argmax(dim=1, keepdim=True)
+                batch_correct = pred.eq(target.view_as(pred)).sum().item()
+                
+                # 更新统计信息
+                running_loss += loss.item()
+                running_correct += batch_correct
+                running_samples += len(data)
+                
+                # 计算移动平均
+                if batch_idx % 10 == 0:
+                    avg_loss = running_loss / (batch_idx + 1)
+                    avg_acc = 100. * running_correct / running_samples
+                    print(f"Batch {batch_idx:3d}/{len(self.train_loader)}: "
+                          f"Loss: {avg_loss:.4f}, "
+                          f"Running Accuracy: {avg_acc:.2f}%")
+                
+                # 更新总体统计
+                total_loss += loss.item()
+                total_correct += batch_correct
+                total_samples += len(data)
+            
+            # 打印epoch统计
+            epoch_loss = total_loss / len(self.train_loader)
+            epoch_acc = 100. * total_correct / total_samples
+            print(f"Epoch {epoch+1}/{epochs} Summary - "
+                  f"Loss: {epoch_loss:.4f}, "
+                  f"Accuracy: {epoch_acc:.2f}%")
+        
+        # 返回训练结果
+        return self.get_parameters({}), total_samples, {
+            "loss": float(epoch_loss),
+            "accuracy": float(total_correct / total_samples)
+        }
+    
+    def evaluate(self, parameters, config):
+        """评估模型"""
+        self.set_parameters(parameters)
+        
+        # 评估
+        self.model.eval()
+        loss = 0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for data, target in self.test_loader:
+                data, target = data.to(self.device), target.to(self.device)
+                output = self.model(data)
+                loss += F.cross_entropy(output, target, reduction='sum').item()
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                total += len(data)
+        
+        accuracy = correct / total if total > 0 else 0.0
+        avg_loss = loss / total if total > 0 else float('inf')
+        
+        return avg_loss, total, {"accuracy": accuracy}
 
 class AsyncSatelliteClient(fl.client.NumPyClient):
     async def _train_async(self):

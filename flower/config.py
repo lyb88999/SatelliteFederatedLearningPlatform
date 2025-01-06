@@ -4,14 +4,16 @@ from datetime import datetime
 
 @dataclass
 class GroundStationConfig:
+    """地面站配置"""
     def __init__(
         self,
         station_id: str,
         latitude: float,
         longitude: float,
-        max_range: float,
-        min_elevation: float,
-        max_satellites: int = 4  # 最大同时可见卫星数
+        max_range: float = 2000.0,
+        min_elevation: float = 10.0,
+        max_satellites: int = 5,
+        altitude: float = 0.0,  # 添加海拔高度，默认为0
     ):
         self.station_id = station_id
         self.latitude = latitude    # 纬度（度）
@@ -19,6 +21,7 @@ class GroundStationConfig:
         self.max_range = max_range  # 最大通信距离（km）
         self.min_elevation = min_elevation  # 最小仰角（度）
         self.max_satellites = max_satellites  # 最大同时可见卫星数
+        self.altitude = altitude  # 添加这行
 
 @dataclass
 class SatelliteConfig:
